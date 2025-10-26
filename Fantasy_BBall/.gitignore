@@ -1,0 +1,37 @@
+# Environment and secrets
+.env
+oauth2.json
+*.json.bak
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# Data files (exclude real data, keep structure)
+data/my_roster.json
+data/healthy_players.json
+data/weekly_matchup.json
+data/ai_recommendations*
+data/ai_prompt.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Parent directory files (these showed up in git status)
+../

@@ -1,0 +1,122 @@
+{
+  "league_settings": {
+    "league_id": 39285,
+    "league_name": "Warriors4life",
+    "team_id": 2,
+    "team_name": "NoMoneyNoHoney",
+    "season": "2025-26",
+    "scoring_type": "Head-to-Head - Categories",
+    "max_teams": 12,
+    "roster_positions": [
+      "PG",
+      "SG",
+      "G",
+      "SF",
+      "PF",
+      "F",
+      "C",
+      "C",
+      "Util",
+      "Util",
+      "BN",
+      "BN",
+      "BN",
+      "IL",
+      "IL"
+    ],
+    "max_acquisitions_week": 4,
+    "weekly_deadline": "Daily - Tomorrow"
+  },
+  "scoring_categories": {
+    "FG%": {
+      "name": "Field Goal Percentage",
+      "stat_id": "5",
+      "type": "percentage",
+      "higher_is_better": true,
+      "importance": "high",
+      "strategy": "Target high-efficiency players (big men, slashers). Avoid high-volume low-efficiency shooters."
+    },
+    "FT%": {
+      "name": "Free Throw Percentage",
+      "stat_id": "15",
+      "type": "percentage",
+      "higher_is_better": true,
+      "importance": "high",
+      "strategy": "Target guards and wings. Avoid poor FT shooters (some centers). Can punt if building around bigs."
+    },
+    "3PTM": {
+      "name": "3-Point Shots Made",
+      "stat_id": "10",
+      "type": "counting",
+      "higher_is_better": true,
+      "importance": "high",
+      "strategy": "Target high-volume 3-point shooters. Guards and modern wings are key."
+    },
+    "PTS": {
+      "name": "Points Scored",
+      "stat_id": "12",
+      "type": "counting",
+      "higher_is_better": true,
+      "importance": "high",
+      "strategy": "Target high-usage scorers. Correlates with minutes and role."
+    },
+    "REB": {
+      "name": "Total Rebounds",
+      "stat_id": "13",
+      "type": "counting",
+      "higher_is_better": true,
+      "importance": "medium",
+      "strategy": "Target big men and versatile forwards. Double-double machines are valuable."
+    },
+    "AST": {
+      "name": "Assists",
+      "stat_id": "14",
+      "type": "counting",
+      "higher_is_better": true,
+      "importance": "medium",
+      "strategy": "Target point guards and playmakers. High usage + low turnovers ideal."
+    },
+    "ST": {
+      "name": "Steals",
+      "stat_id": "16",
+      "type": "counting",
+      "higher_is_better": true,
+      "importance": "medium",
+      "strategy": "Target perimeter defenders and gambling defenders. Hardest cat to find."
+    },
+    "BLK": {
+      "name": "Blocked Shots",
+      "stat_id": "17",
+      "type": "counting",
+      "higher_is_better": true,
+      "importance": "medium",
+      "strategy": "Target rim protectors and tall forwards. Elite shot blockers are scarce."
+    },
+    "TO": {
+      "name": "Turnovers",
+      "stat_id": "18",
+      "type": "counting",
+      "higher_is_better": false,
+      "importance": "low",
+      "strategy": "MINIMIZE turnovers. Avoid high-usage ball-handlers if they turn it over. Low-usage players help."
+    }
+  },
+  "strategy": {
+    "avoid_injured": true,
+    "min_minutes_per_game": 20.0,
+    "prefer_starters": true,
+    "punt_categories": [],
+    "target_categories": [
+      "FG%",
+      "FT%",
+      "3PTM",
+      "PTS",
+      "REB",
+      "AST",
+      "ST",
+      "BLK",
+      "TO"
+    ],
+    "risk_tolerance": "medium"
+  }
+}
