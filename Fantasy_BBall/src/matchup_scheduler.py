@@ -6,6 +6,7 @@ Key Features:
 - Detects if it's Sunday (look ahead to next week)
 - Determines which week's matchup to fetch
 - Handles week transitions intelligently
+- Parses opponent information from matchup data
 """
 
 from datetime import datetime, timedelta
@@ -153,7 +154,7 @@ class MatchupScheduler:
         
         # Final fallback: calculate based on season start
         # NBA 2024-25 season started October 21, 2025
-        season_start = datetime(2025, 10, 21)  # Fixed year to 2025
+        season_start = datetime(2025, 10, 21)
         today = datetime.now()
         
         # If before season start, return 1
@@ -310,6 +311,67 @@ class MatchupScheduler:
             # Silent failure - caller will handle None response
             return None
     
+    def parse_matchup_info(self, matchup_raw: Dict, my_team_key: str) -> Dict:
+        """
+        Parse raw Yahoo matchup data to extract opponent info.
+        
+        Args:
+            matchup_raw: Raw matchup dict from Yahoo API
+            my_team_key: Your team key to identify opponent
+        
+        Returns:
+            Dict with opponent_name, opponent_key, and other matchup info
+        """
+        result = {
+            'week': matchup_raw.get('week'),
+            'week_start': matchup_raw.get('week_start'),
+            'week_end': matchup_raw.get('week_end'),
+            'status': matchup_raw.get('status'),
+            'opponent_name': None,
+            'opponent_key': None
+        }
+        
+        # Extract teams from the nested structure
+        if '0' in matchup_raw and 'teams' in matchup_raw['0']:
+            teams = matchup_raw['0']['teams']
+            
+            for team_idx in ['0', '1']:
+                if team_idx not in teams:
+                    continue
+                    
+                team_data = teams[team_idx]['team']
+                if not isinstance(team_data, list) or len(team_data) == 0:
+                    continue
+                
+                team_info_list = team_data[0]
+                if not isinstance(team_info_list, list):
+                    continue
+                
+                # Extract team info from the list
+                team_key = None
+                team_name = None
+                
+                for item in team_info_list:
+                    if isinstance(item, dict):
+                        if 'team_key' in item:
+                            team_key = item['team_key']
+                        if 'name' in item:
+                            team_name = item['name']
+                
+                # If this is the opponent (not my team)
+                if team_key and team_key != my_team_key:
+                    result['opponent_name'] = team_name
+                    result['opponent_key'] = team_key
+                    
+                    # Store full opponent info
+                    result['opponent'] = {
+                        'team_key': team_key,
+                        'team_name': team_name
+                    }
+                    break
+        
+        return result
+    
     def get_optimal_matchup(self, team_key: str, 
                            date: Optional[datetime] = None,
                            cutoff_hour: int = 0,
@@ -343,22 +405,22 @@ class MatchupScheduler:
             else:
                 print(f"✓ Analyzing current week: Week {target_week}")
         
-        matchup_data = self.get_matchup_for_week(team_key, target_week)
+        matchup_raw = self.get_matchup_for_week(team_key, target_week)
         
         # If looking ahead and next week doesn't exist yet, fall back to current week
-        if matchup_data is None and is_lookahead:
+        if matchup_raw is None and is_lookahead:
             if verbose:
                 print(f"⚠️  Week {target_week} not available yet")
                 print(f"   Falling back to current week: Week {target_week - 1}")
             
             target_week = target_week - 1
             is_lookahead = False
-            matchup_data = self.get_matchup_for_week(team_key, target_week)
+            matchup_raw = self.get_matchup_for_week(team_key, target_week)
             
-            if verbose and matchup_data:
+            if verbose and matchup_raw:
                 print(f"✓ Successfully loaded Week {target_week} matchup as fallback")
         
-        if matchup_data is None:
+        if matchup_raw is None:
             if verbose:
                 print(f"⚠️  Could not fetch Week {target_week} matchup")
             return {
@@ -368,11 +430,14 @@ class MatchupScheduler:
                 'error': 'Could not fetch matchup data'
             }
         
+        # Parse the raw matchup data
+        matchup_parsed = self.parse_matchup_info(matchup_raw, team_key)
+        
         return {
             'week': target_week,
             'is_lookahead': is_lookahead,
             'current_date': date.isoformat(),
-            'matchup': matchup_data,
+            'matchup': matchup_parsed,
             'error': None
         }
 
@@ -421,8 +486,10 @@ if __name__ == "__main__":
         print(f"\n✓ Successfully fetched Week {result['week']} matchup")
         print(f"  Look-ahead mode: {result['is_lookahead']}")
         
-        # Show some matchup details
+        # Show matchup details
         matchup = result['matchup']
+        print(f"  Opponent: {matchup.get('opponent_name', 'Unknown')}")
+        print(f"  Opponent key: {matchup.get('opponent_key', 'Unknown')}")
         if 'week_start' in matchup:
             print(f"  Week starts: {matchup['week_start']}")
         if 'week_end' in matchup:

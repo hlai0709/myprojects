@@ -146,6 +146,91 @@ class AIAnalyzer:
             data = json.load(f)
             return data['players']
     
+    def _fetch_roster_with_stats(self) -> Optional[List[Dict]]:
+        """Fetch roster with stats from Yahoo API."""
+        if not self.scheduler or not self.scheduler.auth:
+            return None
+        
+        try:
+            team_key = self._get_team_key()
+            url = f"{self.scheduler.auth.fantasy_base_url}team/{team_key}/roster/players/stats?format=json"
+            response = self.scheduler.auth.session.get(url, timeout=10)
+            
+            if response.status_code != 200:
+                return None
+            
+            data = response.json()
+            roster = []
+            
+            # Parse roster
+            team_data = data['fantasy_content']['team']
+            for item in team_data:
+                if isinstance(item, dict) and 'roster' in item:
+                    players_data = item['roster']['0']['players']
+                    
+                    for key in players_data:
+                        if key == 'count':
+                            continue
+                        if key.isdigit():
+                            player_entry = players_data[key]
+                            if 'player' in player_entry:
+                                player = self._parse_player_from_api(player_entry['player'])
+                                if player:
+                                    roster.append(player)
+            
+            return roster if roster else None
+            
+        except Exception as e:
+            print(f"⚠️  Error fetching roster stats: {e}")
+            return None
+    
+    def _parse_player_from_api(self, player_list: List) -> Optional[Dict]:
+        """Parse player data from Yahoo API."""
+        player_info = {'stats': {}}
+        
+        if not isinstance(player_list, list):
+            return None
+        
+        # Stat ID mapping
+        stat_ids = {
+            '5': 'FG%', '8': 'FT%', '10': '3PTM', '12': 'PTS',
+            '15': 'REB', '16': 'AST', '17': 'ST', '18': 'BLK', '19': 'TO'
+        }
+        
+        for item in player_list:
+            if isinstance(item, list):
+                for sub_item in item:
+                    if isinstance(sub_item, dict):
+                        if 'player_key' in sub_item:
+                            player_info['player_key'] = sub_item['player_key']
+                        if 'name' in sub_item:
+                            player_info['name'] = sub_item['name']['full']
+                        if 'primary_position' in sub_item:
+                            player_info['primary_position'] = sub_item['primary_position']
+                        if 'editorial_team_abbr' in sub_item:
+                            player_info['team'] = sub_item['editorial_team_abbr']
+            elif isinstance(item, dict):
+                if 'player_stats' in item:
+                    stats_data = item['player_stats']
+                    if 'stats' in stats_data:
+                        for stat_item in stats_data['stats']:
+                            if 'stat' in stat_item:
+                                stat = stat_item['stat']
+                                stat_id = stat.get('stat_id')
+                                value = stat.get('value', '')
+                                
+                                if stat_id in stat_ids:
+                                    cat = stat_ids[stat_id]
+                                    try:
+                                        if value == '' or value == '-':
+                                            player_info['stats'][cat] = 0.0
+                                        else:
+                                            player_info['stats'][cat] = float(value)
+                                    except:
+                                        player_info['stats'][cat] = 0.0
+        
+        return player_info if 'player_key' in player_info else None
+    
     def load_matchup(self) -> Dict:
         """
         Load weekly matchup data using MatchupScheduler (LIVE DATA).
@@ -518,6 +603,13 @@ Focus on winning this week's matchup. Be specific and concise."""
         print("Loading data...")
         my_roster = self.load_roster()
         print(f"✓ Loaded {len(my_roster)} players from your roster")
+        
+        # Fetch stats for roster if needed
+        if my_roster and (not my_roster[0].get('stats') or not my_roster[0]['stats']):
+            print("⚠️  Roster missing stats, fetching from API...")
+            my_roster = self._fetch_roster_with_stats()
+            if my_roster:
+                print(f"✓ Fetched stats for {len(my_roster)} players")
         
         available_players = self.load_available_players()
         print(f"✓ Loaded {len(available_players)} available players")

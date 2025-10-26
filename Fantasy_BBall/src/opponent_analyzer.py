@@ -1,12 +1,11 @@
 """
 opponent_analyzer.py
 Analyzes opponent's roster and calculates winnable categories.
-Uses 14-day performance window and 15% winnable threshold.
+Uses Yahoo API to fetch real player stats (season averages as proxy for weekly projection).
 """
 
-from typing import Dict, List, Tuple, Optional
-from datetime import datetime, timedelta
-import statistics
+from typing import Dict, List, Optional
+from datetime import datetime
 
 
 class OpponentAnalyzer:
@@ -15,6 +14,19 @@ class OpponentAnalyzer:
     def __init__(self, auth_client):
         self.auth = auth_client
         self.categories = ['FG%', 'FT%', '3PTM', 'PTS', 'REB', 'AST', 'ST', 'BLK', 'TO']
+        
+        # Yahoo stat IDs
+        self.stat_ids = {
+            'FG%': '5',
+            'FT%': '8', 
+            '3PTM': '10',
+            'PTS': '12',
+            'REB': '15',
+            'AST': '16',
+            'ST': '17',
+            'BLK': '18',
+            'TO': '19'
+        }
         
     def analyze_matchup(self, my_roster: List[Dict], 
                        opponent_team_key: str,
@@ -25,7 +37,7 @@ class OpponentAnalyzer:
         Args:
             my_roster: Your roster with player data
             opponent_team_key: Opponent's team key
-            days_lookback: Days to look back for stats (default 14)
+            days_lookback: Not used (kept for compatibility)
             
         Returns:
             Dict with category analysis and recommendations
@@ -35,23 +47,19 @@ class OpponentAnalyzer:
         if not opponent_roster:
             return {'error': 'Could not fetch opponent roster'}
         
-        # Get recent stats for both rosters
-        my_stats = self._get_roster_stats(my_roster, days_lookback)
-        opp_stats = self._get_roster_stats(opponent_roster, days_lookback)
-        
-        # Project weekly totals
-        my_proj = self._project_weekly_totals(my_stats)
-        opp_proj = self._project_weekly_totals(opp_stats)
+        # Get season stats for both rosters (proxy for weekly projection)
+        my_stats = self._get_team_stats(my_roster)
+        opp_stats = self._get_team_stats(opponent_roster)
         
         # Calculate gaps
-        gaps = self._calculate_category_gaps(my_proj, opp_proj)
+        gaps = self._calculate_category_gaps(my_stats, opp_stats)
         
         # Classify categories
         classification = self._classify_categories(gaps)
         
         return {
-            'my_projections': my_proj,
-            'opponent_projections': opp_proj,
+            'my_projections': my_stats,
+            'opponent_projections': opp_stats,
             'category_gaps': gaps,
             'classification': classification,
             'opponent_roster_size': len(opponent_roster)
@@ -60,7 +68,7 @@ class OpponentAnalyzer:
     def _fetch_opponent_roster(self, team_key: str) -> Optional[List[Dict]]:
         """Fetch opponent's roster from Yahoo API."""
         try:
-            url = f"{self.auth.fantasy_base_url}team/{team_key}/roster?format=json"
+            url = f"{self.auth.fantasy_base_url}team/{team_key}/roster/players/stats?format=json"
             response = self.auth.session.get(url, timeout=10)
             
             if response.status_code != 200:
@@ -81,36 +89,74 @@ class OpponentAnalyzer:
                         if key.isdigit():
                             player_entry = players_data[key]
                             if 'player' in player_entry:
-                                player_list = player_entry['player']
-                                if isinstance(player_list, list):
-                                    player_info = {}
-                                    for p in player_list:
-                                        if isinstance(p, list):
-                                            for pi in p:
-                                                if isinstance(pi, dict):
-                                                    if 'name' in pi:
-                                                        player_info['name'] = pi['name']['full']
-                                                    if 'player_key' in pi:
-                                                        player_info['player_key'] = pi['player_key']
-                                    
-                                    if player_info:
-                                        roster.append(player_info)
+                                player = self._parse_player_data(player_entry['player'])
+                                if player:
+                                    roster.append(player)
             
             return roster if roster else None
             
-        except Exception:
+        except Exception as e:
+            print(f"Debug - Error fetching opponent roster: {e}")
             return None
     
-    def _get_roster_stats(self, roster: List[Dict], days: int) -> Dict:
+    def _parse_player_data(self, player_list: List) -> Optional[Dict]:
+        """Parse player data from Yahoo API format."""
+        player_info = {}
+        
+        if not isinstance(player_list, list):
+            return None
+        
+        for item in player_list:
+            if isinstance(item, list):
+                for sub_item in item:
+                    if isinstance(sub_item, dict):
+                        if 'player_key' in sub_item:
+                            player_info['player_key'] = sub_item['player_key']
+                        if 'name' in sub_item:
+                            player_info['name'] = sub_item['name']['full']
+            elif isinstance(item, dict):
+                if 'player_stats' in item:
+                    stats_data = item['player_stats']
+                    if 'stats' in stats_data:
+                        player_info['stats'] = self._parse_stats(stats_data['stats'])
+        
+        return player_info if 'player_key' in player_info else None
+    
+    def _parse_stats(self, stats_list: List) -> Dict:
+        """Parse stats from Yahoo format."""
+        stats = {}
+        
+        for stat_item in stats_list:
+            if 'stat' in stat_item:
+                stat = stat_item['stat']
+                stat_id = stat.get('stat_id')
+                value = stat.get('value', '')
+                
+                # Map stat_id to category name
+                for cat, sid in self.stat_ids.items():
+                    if sid == stat_id:
+                        # Convert value to float, handle empty strings
+                        try:
+                            if value == '' or value == '-':
+                                stats[cat] = 0.0
+                            else:
+                                stats[cat] = float(value)
+                        except:
+                            stats[cat] = 0.0
+                        break
+        
+        return stats
+    
+    def _get_team_stats(self, roster: List[Dict]) -> Dict:
         """
-        Get aggregate stats for roster over last N days.
-        Uses season averages as proxy (Yahoo doesn't provide easy 14-day stats).
+        Aggregate team stats from roster.
+        
+        For percentages (FG%, FT%): Calculate weighted average
+        For counting stats: Sum totals
         """
-        # Simplified: Use player names to estimate stats
-        # In production, you'd fetch actual recent game logs
-        stats = {
-            'FG%': [],
-            'FT%': [],
+        team_stats = {
+            'FG%': [],  # Store individual values for weighted avg
+            'FT%': [],  # Store individual values for weighted avg
             '3PTM': 0,
             'PTS': 0,
             'REB': 0,
@@ -120,27 +166,38 @@ class OpponentAnalyzer:
             'TO': 0
         }
         
-        # For now, return estimated stats based on roster size
-        # Real implementation would fetch player game logs
-        return stats
+        for player in roster:
+            stats = player.get('stats', {})
+            
+            # Collect percentage stats for averaging
+            if stats.get('FG%', 0) > 0:
+                team_stats['FG%'].append(stats['FG%'])
+            if stats.get('FT%', 0) > 0:
+                team_stats['FT%'].append(stats['FT%'])
+            
+            # Sum counting stats
+            team_stats['3PTM'] += stats.get('3PTM', 0)
+            team_stats['PTS'] += stats.get('PTS', 0)
+            team_stats['REB'] += stats.get('REB', 0)
+            team_stats['AST'] += stats.get('AST', 0)
+            team_stats['ST'] += stats.get('ST', 0)
+            team_stats['BLK'] += stats.get('BLK', 0)
+            team_stats['TO'] += stats.get('TO', 0)
+        
+        # Calculate average percentages
+        if team_stats['FG%']:
+            team_stats['FG%'] = sum(team_stats['FG%']) / len(team_stats['FG%'])
+        else:
+            team_stats['FG%'] = 0.0
+        
+        if team_stats['FT%']:
+            team_stats['FT%'] = sum(team_stats['FT%']) / len(team_stats['FT%'])
+        else:
+            team_stats['FT%'] = 0.0
+        
+        return team_stats
     
-    def _project_weekly_totals(self, stats: Dict) -> Dict:
-        """Project weekly totals from recent performance."""
-        # Simplified projection
-        # Real implementation would multiply daily averages by games played
-        return {
-            'FG%': 0.450,  # Placeholder
-            'FT%': 0.800,  # Placeholder
-            '3PTM': 50,
-            'PTS': 700,
-            'REB': 300,
-            'AST': 150,
-            'ST': 45,
-            'BLK': 30,
-            'TO': 90
-        }
-    
-    def _calculate_category_gaps(self, my_proj: Dict, opp_proj: Dict) -> Dict:
+    def _calculate_category_gaps(self, my_stats: Dict, opp_stats: Dict) -> Dict:
         """
         Calculate percentage gap for each category.
         Positive = you're ahead, Negative = you're behind.
@@ -148,11 +205,17 @@ class OpponentAnalyzer:
         gaps = {}
         
         for cat in self.categories:
-            my_val = my_proj.get(cat, 0)
-            opp_val = opp_proj.get(cat, 0)
+            my_val = my_stats.get(cat, 0)
+            opp_val = opp_stats.get(cat, 0)
             
             if opp_val == 0:
-                gaps[cat] = {'gap_pct': 0, 'status': 'UNKNOWN'}
+                # If opponent has no value, consider it a tie
+                gaps[cat] = {
+                    'my_value': my_val,
+                    'opp_value': opp_val,
+                    'gap_pct': 0.0,
+                    'status': 'UNKNOWN'
+                }
                 continue
             
             # For TO (lower is better), flip the sign
@@ -161,10 +224,21 @@ class OpponentAnalyzer:
             else:
                 gap_pct = ((my_val - opp_val) / opp_val) * 100
             
+            # Determine status
+            if gap_pct > 15:
+                status = 'DOMINATING'
+            elif gap_pct > 0:
+                status = 'WINNING'
+            elif gap_pct > -15:
+                status = 'COMPETITIVE'
+            else:
+                status = 'LOSING'
+            
             gaps[cat] = {
-                'my_value': my_val,
-                'opp_value': opp_val,
-                'gap_pct': round(gap_pct, 1)
+                'my_value': round(my_val, 2),
+                'opp_value': round(opp_val, 2),
+                'gap_pct': round(gap_pct, 1),
+                'status': status
             }
         
         return gaps
@@ -195,7 +269,7 @@ class OpponentAnalyzer:
                     'gap': gap,
                     'strategy': 'PROTECT'
                 })
-            elif gap >= 0 and gap < winnable_threshold:
+            elif gap >= 0 and gap < dominant_threshold:
                 classification['winnable'].append({
                     'category': cat,
                     'gap': gap,
@@ -246,17 +320,3 @@ class OpponentAnalyzer:
             lines.append(f"LOSING: {', '.join(cats)} - Punt these")
         
         return '\n'.join(lines)
-
-
-def quick_analyze(auth, my_roster: List[Dict], opponent_key: str) -> Tuple[Dict, str]:
-    """
-    Quick analysis function for easy integration.
-    
-    Returns:
-        Tuple of (full_analysis_dict, formatted_prompt_text)
-    """
-    analyzer = OpponentAnalyzer(auth)
-    analysis = analyzer.analyze_matchup(my_roster, opponent_key)
-    prompt_text = analyzer.format_analysis_for_prompt(analysis)
-    
-    return analysis, prompt_text
