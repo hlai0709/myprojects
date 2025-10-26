@@ -1,7 +1,7 @@
 """
-ai_analyzer.py - OPTIMIZED VERSION (FINAL FIX)
+ai_analyzer.py - OPTIMIZED VERSION with Live Matchup Scheduler
 Flexible AI integration with cost optimization and prompt caching.
-Works with dataclass-based LeagueConfig.
+Now uses MatchupScheduler for live data with Sunday look-ahead capability.
 """
 
 import json
@@ -26,10 +26,27 @@ except ImportError:
     LEAGUE_CONFIG_AVAILABLE = False
     print("⚠️  league_config.py not found - using defaults")
 
+# Import MatchupScheduler for live data
+try:
+    from matchup_scheduler import MatchupScheduler
+    from auth import YahooAuth
+    MATCHUP_SCHEDULER_AVAILABLE = True
+except ImportError:
+    MATCHUP_SCHEDULER_AVAILABLE = False
+    print("⚠️  matchup_scheduler.py or auth.py not found - matchup features disabled")
+
+# Import OpponentAnalyzer for category gap analysis
+try:
+    from opponent_analyzer import OpponentAnalyzer
+    OPPONENT_ANALYZER_AVAILABLE = True
+except ImportError:
+    OPPONENT_ANALYZER_AVAILABLE = False
+    print("⚠️  opponent_analyzer.py not found - category analysis disabled")
+
 
 class AIAnalyzer:
     """
-    Optimized AI analyzer with cost-efficient prompting.
+    Optimized AI analyzer with cost-efficient prompting and live matchup data.
     """
     
     def __init__(self, config=None):
@@ -44,6 +61,20 @@ class AIAnalyzer:
         self.ai_provider = None
         self.api_key = None
         self.client = None
+        
+        # Initialize matchup scheduler
+        self.scheduler = None
+        self.opponent_analyzer = None
+        if MATCHUP_SCHEDULER_AVAILABLE:
+            try:
+                auth = YahooAuth()
+                self.scheduler = MatchupScheduler(auth)
+                
+                # Also initialize opponent analyzer if available
+                if OPPONENT_ANALYZER_AVAILABLE:
+                    self.opponent_analyzer = OpponentAnalyzer(auth)
+            except Exception as e:
+                print(f"⚠️  Could not initialize schedulers: {e}")
         
         # Load environment variables
         load_dotenv()
@@ -62,6 +93,12 @@ class AIAnalyzer:
         if self.config and hasattr(self.config, 'settings'):
             return self.config.settings.team_name
         return "NoMoneyNoHoney"
+    
+    def _get_team_key(self) -> str:
+        """Safely get team key."""
+        if self.config and hasattr(self.config, 'settings'):
+            return f"{self.config.settings.game_key}.l.{self.config.settings.league_id}.t.{self.config.settings.team_id}"
+        return "466.l.39285.t.2"
     
     def _init_claude_api(self):
         """Initialize Claude API client if available."""
@@ -109,13 +146,30 @@ class AIAnalyzer:
             data = json.load(f)
             return data['players']
     
-    def load_matchup(self, filename='data/weekly_matchup.json'):
-        """Load weekly matchup data (if available)."""
-        if not os.path.exists(filename):
-            return None
+    def load_matchup(self) -> Dict:
+        """
+        Load weekly matchup data using MatchupScheduler (LIVE DATA).
         
-        with open(filename, 'r') as f:
-            return json.load(f)
+        Automatically handles Sunday look-ahead:
+        - Sunday: Analyzes NEXT week's opponent
+        - Monday-Saturday: Analyzes CURRENT week's opponent
+        
+        Returns:
+            Dict with matchup data and metadata including week info
+        """
+        if not self.scheduler:
+            raise RuntimeError("MatchupScheduler not available. Check auth.py and matchup_scheduler.py")
+        
+        team_key = self._get_team_key()
+        
+        # Get optimal matchup (handles Sunday look-ahead automatically)
+        result = self.scheduler.get_optimal_matchup(
+            team_key=team_key,
+            cutoff_hour=0,  # Switch at midnight on Sunday
+            verbose=False   # We'll show our own messages
+        )
+        
+        return result
     
     def _filter_top_available_players(self, 
                                      available_players: List[Dict], 
@@ -173,32 +227,48 @@ class AIAnalyzer:
         
         return '\n'.join(lines)
     
-    def _build_matchup_summary(self, matchup_data: Dict) -> str:
-        """Build compact matchup summary."""
-        if not matchup_data:
+    def _build_matchup_summary(self, matchup_result: Dict, opponent_analysis: Optional[str] = None) -> str:
+        """
+        Build compact matchup summary from scheduler result with optional opponent analysis.
+        
+        Args:
+            matchup_result: Result from scheduler.get_optimal_matchup()
+            opponent_analysis: Formatted opponent analysis text (optional)
+        
+        Returns:
+            Formatted matchup string with week context and category analysis
+        """
+        if not matchup_result or not matchup_result.get('matchup'):
             return ""
         
+        matchup = matchup_result['matchup']
+        week = matchup_result.get('week', '?')
+        is_lookahead = matchup_result.get('is_lookahead', False)
+        
         lines = []
-        lines.append(f"Week {matchup_data.get('week', 'N/A')} vs {matchup_data.get('opponent', {}).get('team_name', 'Unknown')}")
         
-        if 'category_comparison' in matchup_data:
-            comparison = matchup_data['category_comparison']
-            
-            winning = [cat for cat, data in comparison.items() if data.get('status') == 'WINNING']
-            losing = [cat for cat, data in comparison.items() if data.get('status') == 'LOSING']
-            tied = [cat for cat, data in comparison.items() if data.get('status') == 'TIED']
-            
-            lines.append(f"WINNING: {', '.join(winning) if winning else 'None'}")
-            lines.append(f"LOSING: {', '.join(losing) if losing else 'None'}")
-            lines.append(f"TIED: {', '.join(tied) if tied else 'None'}")
+        # Add week context header
+        if is_lookahead:
+            lines.append(f"📅 ANALYZING NEXT WEEK (Week {week}) - Sunday Look-Ahead")
+        else:
+            lines.append(f"📅 ANALYZING CURRENT WEEK (Week {week})")
         
-        if 'strategic_targets' in matchup_data:
-            targets = matchup_data['strategic_targets']
-            
-            if targets.get('winnable'):
-                winnable_cats = [f"{item['category']} ({item.get('diff_pct', 0):.0f}% gap)" 
-                               for item in targets['winnable'][:3]]  # Top 3 only
-                lines.append(f"🎯 WINNABLE: {', '.join(winnable_cats)}")
+        lines.append("")
+        
+        # Add opponent info
+        opponent_name = matchup.get('opponent_name', 'Unknown')
+        lines.append(f"Week {week} vs {opponent_name}")
+        
+        # Add matchup dates if available
+        if 'week_start' in matchup:
+            lines.append(f"Starts: {matchup['week_start']}")
+        if 'week_end' in matchup:
+            lines.append(f"Ends: {matchup['week_end']}")
+        
+        # Add opponent analysis if available
+        if opponent_analysis:
+            lines.append("")
+            lines.append(opponent_analysis)
         
         return '\n'.join(lines)
     
@@ -206,7 +276,8 @@ class AIAnalyzer:
                               my_roster: List[Dict],
                               available_players: List[Dict],
                               target_categories: Optional[List[str]] = None,
-                              matchup_data: Optional[Dict] = None) -> str:
+                              matchup_result: Optional[Dict] = None,
+                              opponent_analysis: Optional[str] = None) -> str:
         """
         Build OPTIMIZED prompt that's 40-50% smaller.
         
@@ -215,6 +286,9 @@ class AIAnalyzer:
         2. Only top 25 available players (not 50)
         3. Removed redundant explanations
         4. More structured, less verbose
+        
+        Args:
+            matchup_result: Result from scheduler.get_optimal_matchup()
         """
         
         # Get league info safely
@@ -231,7 +305,7 @@ class AIAnalyzer:
         # Build compact sections
         roster_summary = self._build_compact_roster_summary(my_roster)
         available_summary = self._build_compact_available_players(filtered_players)
-        matchup_summary = self._build_matchup_summary(matchup_data) if matchup_data else ""
+        matchup_summary = self._build_matchup_summary(matchup_result, opponent_analysis) if matchup_result else ""
         
         # Build optimized prompt
         prompt = f"""Fantasy Basketball Roster Analysis
@@ -248,7 +322,7 @@ TOP AVAILABLE FREE AGENTS ({len(filtered_players)} shown):
 ({len(available_players) - len(filtered_players)} more available)"""
 
         if matchup_summary:
-            prompt += f"\n\nMATCHUP:\n{matchup_summary}"
+            prompt += f"\n\n{matchup_summary}"
         
         if target_categories:
             prompt += f"\n\nPRIORITY CATEGORIES: {', '.join(target_categories)}"
@@ -272,13 +346,13 @@ Focus on winning this week's matchup. Be specific and concise."""
                        my_roster: List[Dict],
                        available_players: List[Dict],
                        target_categories: Optional[List[str]] = None,
-                       matchup_data: Optional[Dict] = None) -> str:
+                       matchup_result: Optional[Dict] = None) -> str:
         """
         Wrapper that calls optimized prompt builder.
         Kept for backward compatibility.
         """
         return self.build_optimized_prompt(
-            my_roster, available_players, target_categories, matchup_data
+            my_roster, available_players, target_categories, matchup_result
         )
     
     def call_claude_api(self, prompt: str, max_tokens: int = 2048, use_caching: bool = True) -> str:
@@ -427,20 +501,20 @@ Focus on winning this week's matchup. Be specific and concise."""
     
     def analyze_with_api(self, target_categories: Optional[List[str]] = None):
         """
-        Automatic analysis using Claude API.
+        Automatic analysis using Claude API with LIVE matchup data.
         
         Args:
             target_categories: Specific categories to focus on (optional)
         """
         if not self.is_api_available():
-            print("\n❌ Claude API not available. Falling back to manual mode...")
-            return self.analyze_with_manual_input(target_categories)
+            print("\n❌ Claude API not available. Cannot proceed.")
+            return None
         
         print("\n" + "="*80)
-        print("AI-POWERED ROSTER ANALYSIS (Optimized Mode)")
+        print("AI-POWERED ROSTER ANALYSIS (Live Data + Optimized)")
         print("="*80 + "\n")
         
-        # Load data
+        # Load roster data
         print("Loading data...")
         my_roster = self.load_roster()
         print(f"✓ Loaded {len(my_roster)} players from your roster")
@@ -448,11 +522,51 @@ Focus on winning this week's matchup. Be specific and concise."""
         available_players = self.load_available_players()
         print(f"✓ Loaded {len(available_players)} available players")
         
-        matchup_data = self.load_matchup()
-        if matchup_data:
-            print(f"✓ Loaded Week {matchup_data.get('week')} matchup data")
-        else:
-            print("⚠️  No matchup data available")
+        # Load LIVE matchup data with Sunday look-ahead
+        print("\nFetching live matchup data...")
+        opponent_analysis_text = None
+        try:
+            matchup_result = self.load_matchup()
+            
+            if matchup_result and matchup_result.get('matchup'):
+                week = matchup_result.get('week', '?')
+                is_lookahead = matchup_result.get('is_lookahead', False)
+                opponent = matchup_result['matchup'].get('opponent_name', 'Unknown')
+                
+                if is_lookahead:
+                    print(f"✨ Sunday detected! Analyzing NEXT WEEK (Week {week})")
+                    print(f"✓ Next opponent: {opponent}")
+                else:
+                    print(f"✓ Analyzing current week (Week {week})")
+                    print(f"✓ Current opponent: {opponent}")
+                
+                # Run opponent analysis if available
+                if self.opponent_analyzer and 'opponent' in matchup_result['matchup']:
+                    print("\n🔍 Analyzing opponent roster...")
+                    try:
+                        # Get opponent team key from matchup
+                        opponent_info = matchup_result['matchup'].get('opponent', {})
+                        opponent_key = opponent_info.get('team_key')
+                        
+                        if opponent_key:
+                            analysis = self.opponent_analyzer.analyze_matchup(
+                                my_roster, 
+                                opponent_key,
+                                days_lookback=14
+                            )
+                            opponent_analysis_text = self.opponent_analyzer.format_analysis_for_prompt(analysis)
+                            print("✓ Category analysis complete")
+                        else:
+                            print("⚠️  Opponent team key not available")
+                    except Exception as e:
+                        print(f"⚠️  Opponent analysis failed: {e}")
+            else:
+                print("⚠️  Could not fetch matchup data")
+                matchup_result = None
+                
+        except Exception as e:
+            print(f"⚠️  Error fetching matchup: {e}")
+            matchup_result = None
         
         # Build optimized prompt
         print("\nGenerating optimized AI prompt...")
@@ -460,7 +574,8 @@ Focus on winning this week's matchup. Be specific and concise."""
             my_roster=my_roster,
             available_players=available_players,
             target_categories=target_categories,
-            matchup_data=matchup_data
+            matchup_result=matchup_result,
+            opponent_analysis=opponent_analysis_text
         )
         
         # Calculate token savings
@@ -481,99 +596,19 @@ Focus on winning this week's matchup. Be specific and concise."""
             self.save_recommendations(ai_response, prompt)
             print(self.format_recommendations_for_display(ai_response))
             
+            # Show week context reminder
+            if matchup_result and matchup_result.get('is_lookahead'):
+                print("\n" + "="*80)
+                print("💡 REMINDER: These recommendations are for NEXT WEEK's matchup")
+                week = matchup_result.get('week', '?')
+                opponent = matchup_result['matchup'].get('opponent_name', 'TBD')
+                print(f"   Week {week} vs {opponent}")
+                print("="*80)
+            
             return ai_response
             
         except Exception as e:
             print(f"\n❌ API call failed: {e}")
-            print("\nFalling back to manual mode...")
-            return self.analyze_with_manual_input(target_categories)
-    
-    def analyze_with_manual_input(self, target_categories: Optional[List[str]] = None):
-        """
-        Generate prompt for manual AI analysis.
-        Copy the prompt and paste into any AI chat.
-        """
-        print("\n" + "="*80)
-        print("MANUAL AI ANALYSIS MODE")
-        print("="*80 + "\n")
-        
-        # Load data
-        print("Loading roster data...")
-        my_roster = self.load_roster()
-        print(f"✓ Loaded {len(my_roster)} players from your roster")
-        
-        print("Loading available players...")
-        available_players = self.load_available_players()
-        print(f"✓ Loaded {len(available_players)} available players")
-        
-        print("Loading matchup data...")
-        matchup_data = self.load_matchup()
-        if matchup_data:
-            print(f"✓ Loaded Week {matchup_data.get('week')} matchup data")
-        else:
-            print("⚠️  No matchup data available")
-        
-        # Build prompt
-        print("\nGenerating AI prompt...")
-        prompt = self.build_optimized_prompt(
-            my_roster=my_roster,
-            available_players=available_players,
-            target_categories=target_categories,
-            matchup_data=matchup_data
-        )
-        
-        # Save prompt to file
-        prompt_file = 'data/ai_prompt.txt'
-        with open(prompt_file, 'w') as f:
-            f.write(prompt)
-        
-        print(f"\n✓ Prompt saved to {prompt_file}")
-        print(f"✓ Prompt length: {len(prompt)} characters")
-        
-        # Display instructions
-        print("\n" + "="*80)
-        print("INSTRUCTIONS")
-        print("="*80 + "\n")
-        print("1. Open data/ai_prompt.txt")
-        print("2. Copy the ENTIRE contents")
-        print("3. Paste into your AI of choice:")
-        print("   - Claude (https://claude.ai)")
-        print("   - ChatGPT (https://chat.openai.com)")
-        print("   - Grok (https://x.ai)")
-        print("   - Gemini (https://gemini.google.com)")
-        print("4. Copy the AI's response")
-        print("5. Paste it back here when prompted")
-        print("\n" + "="*80 + "\n")
-        
-        # Wait for user to paste response
-        print("Paste the AI's response below (press Ctrl+D or Ctrl+Z when done):")
-        print("-" * 80)
-        
-        try:
-            ai_response_lines = []
-            while True:
-                try:
-                    line = input()
-                    ai_response_lines.append(line)
-                except EOFError:
-                    break
-            
-            ai_response = '\n'.join(ai_response_lines)
-            
-            if ai_response.strip():
-                # Save recommendations
-                self.save_recommendations(ai_response, prompt)
-                
-                # Display
-                print(self.format_recommendations_for_display(ai_response))
-                
-                return ai_response
-            else:
-                print("\n⚠️  No response entered. Prompt is saved in data/ai_prompt.txt")
-                return None
-                
-        except KeyboardInterrupt:
-            print("\n\n⚠️  Cancelled. Prompt is saved in data/ai_prompt.txt")
             return None
 
 
@@ -583,7 +618,7 @@ if __name__ == "__main__":
     analyzer = AIAnalyzer(config)
     
     print("\n" + "="*80)
-    print("AI-Powered Fantasy Basketball Analyzer (OPTIMIZED)")
+    print("AI-Powered Fantasy Basketball Analyzer (LIVE DATA)")
     print("="*80 + "\n")
     
     # Check API status
@@ -592,10 +627,18 @@ if __name__ == "__main__":
         print(f"  Provider: {analyzer.ai_provider}")
         print(f"  API Key: {analyzer.api_key}")
         print("  Cost optimization: ENABLED (50% savings)")
-        mode = "automatic"
     else:
-        print("⚠️  Claude API not available - will use manual mode")
-        mode = "manual"
+        print("❌ Claude API not available - cannot proceed")
+        print("   Check your ANTHROPIC_API_KEY in .env file")
+        exit(1)
+    
+    # Check scheduler status
+    if analyzer.scheduler:
+        print("✓ Live matchup scheduler is ready!")
+        print("  Sunday look-ahead: ENABLED")
+    else:
+        print("⚠️  Matchup scheduler not available")
+        print("   Analysis will proceed without matchup context")
     
     print("\n" + "-"*80 + "\n")
     
@@ -610,20 +653,21 @@ if __name__ == "__main__":
     
     target_categories = None
     if choice == "1":
-        # Try to auto-detect from matchup
+        # Try to get winnable categories from live matchup
         try:
-            matchup_data = analyzer.load_matchup()
-            if matchup_data and 'strategic_targets' in matchup_data:
-                winnable = matchup_data['strategic_targets'].get('winnable', [])
-                if winnable:
-                    target_categories = [w['category'] for w in winnable]
-                    print(f"\n✓ Targeting winnable categories: {', '.join(target_categories)}")
-                else:
-                    print("\n⚠️  No winnable categories found in matchup data")
-            else:
-                print("\n⚠️  No matchup data available for targeted analysis")
-        except:
-            print("\n⚠️  Could not load matchup data")
+            team_key = config.settings.game_key + ".l." + str(config.settings.league_id) + ".t." + str(config.settings.team_id)
+            matchup_result = analyzer.load_matchup()
+            
+            # Note: Your matchup data structure may not have 'strategic_targets'
+            # This would need to be added to matchup_scheduler.py if you want this feature
+            # For now, we'll just inform the user
+            print("\n⚠️  Winnable category detection not yet implemented in live matchup data")
+            print("   Using general roster improvement instead")
+            
+        except Exception as e:
+            print(f"\n⚠️  Could not load matchup data: {e}")
+            print("   Using general roster improvement instead")
+            
     elif choice == "3":
         cats_input = input("Enter categories (comma-separated, e.g., FG%,3PTM,BLK): ").strip()
         if cats_input:
@@ -631,7 +675,4 @@ if __name__ == "__main__":
             print(f"\n✓ Targeting: {', '.join(target_categories)}")
     
     # Run analysis
-    if mode == "automatic":
-        analyzer.analyze_with_api(target_categories=target_categories)
-    else:
-        analyzer.analyze_with_manual_input(target_categories=target_categories)
+    analyzer.analyze_with_api(target_categories=target_categories)
