@@ -2,10 +2,34 @@
 opponent_analyzer.py
 Analyzes opponent's roster and calculates winnable categories.
 Uses Yahoo API to fetch real player stats (season averages as proxy for weekly projection).
+Production version with error handling, caching, and logging.
 """
 
 from typing import Dict, List, Optional
 from datetime import datetime
+
+# Import production utilities
+try:
+    from utils import cache, logger, retry_on_failure, safe_api_call, espn_rate_limiter
+    UTILS_AVAILABLE = True
+except ImportError:
+    UTILS_AVAILABLE = False
+    # Dummy implementations if utils not available
+    cache = None
+    class DummyLogger:
+        def info(self, msg): pass
+        def warning(self, msg): pass
+        def error(self, msg): pass
+    logger = DummyLogger()
+    def retry_on_failure(*args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator
+    def safe_api_call(func):
+        return func
+    class DummyRateLimiter:
+        def wait_if_needed(self): pass
+    espn_rate_limiter = DummyRateLimiter()
 
 
 class OpponentAnalyzer:
@@ -28,28 +52,72 @@ class OpponentAnalyzer:
             'TO': '19'
         }
         
+        # NBA team abbreviations mapping (Yahoo uses different abbrevs sometimes)
+        self.team_abbrev_map = {
+            'PHO': 'PHX', 'SA': 'SAS', 'NO': 'NOP', 'NY': 'NYK', 'GS': 'GSW'
+        }
+        
     def analyze_matchup(self, my_roster: List[Dict], 
                        opponent_team_key: str,
-                       days_lookback: int = 14) -> Dict:
+                       days_lookback: int = 14,
+                       week_start: Optional[str] = None,
+                       week_end: Optional[str] = None) -> Dict:
         """
         Full matchup analysis with category projections.
+        Production version with validation and error handling.
         
         Args:
             my_roster: Your roster with player data
             opponent_team_key: Opponent's team key
             days_lookback: Not used (kept for compatibility)
+            week_start: Week start date for schedule-based projections (optional)
+            week_end: Week end date for schedule-based projections (optional)
             
         Returns:
             Dict with category analysis and recommendations
         """
+        logger.info(f"Starting matchup analysis vs {opponent_team_key}")
+        
+        # Validate inputs
+        if not my_roster:
+            logger.error("Empty roster provided")
+            return {'error': 'Empty roster provided'}
+        
+        if not opponent_team_key:
+            logger.error("No opponent team key provided")
+            return {'error': 'No opponent team key provided'}
+        
         # Get opponent roster
         opponent_roster = self._fetch_opponent_roster(opponent_team_key)
         if not opponent_roster:
+            logger.error(f"Could not fetch opponent roster for {opponent_team_key}")
             return {'error': 'Could not fetch opponent roster'}
         
+        logger.info(f"Fetched opponent roster: {len(opponent_roster)} players")
+        
+        # Get games per team if week dates provided
+        games_per_team = None
+        if week_start and week_end:
+            print(f"    Fetching NBA schedule for {week_start} to {week_end}...")
+            games_per_team = self._get_games_per_team(week_start, week_end)
+            
+            if games_per_team:
+                avg_games = sum(games_per_team.values()) / len(games_per_team) if games_per_team else 0
+                print(f"    ✓ Got schedule for {len(games_per_team)} teams (avg {avg_games:.1f} games)")
+                logger.info(f"Schedule fetched: {len(games_per_team)} teams, avg {avg_games:.1f} games")
+            else:
+                print(f"    ⚠️  Using default 3.5 games/team estimate")
+                logger.warning("No schedule data available, using defaults")
+        
         # Get season stats for both rosters (proxy for weekly projection)
-        my_stats = self._get_team_stats(my_roster)
-        opp_stats = self._get_team_stats(opponent_roster)
+        try:
+            my_stats = self._get_team_stats(my_roster, exclude_injured=True, 
+                                            games_per_team=games_per_team)
+            opp_stats = self._get_team_stats(opponent_roster, exclude_injured=True,
+                                             games_per_team=games_per_team)
+        except Exception as e:
+            logger.error(f"Error calculating team stats: {e}")
+            return {'error': f'Error calculating team stats: {e}'}
         
         # Calculate gaps
         gaps = self._calculate_category_gaps(my_stats, opp_stats)
@@ -57,12 +125,21 @@ class OpponentAnalyzer:
         # Classify categories
         classification = self._classify_categories(gaps)
         
+        logger.info("Matchup analysis complete")
+        
         return {
             'my_projections': my_stats,
             'opponent_projections': opp_stats,
             'category_gaps': gaps,
             'classification': classification,
-            'opponent_roster_size': len(opponent_roster)
+            'opponent_roster_size': len(opponent_roster),
+            'injury_info': {
+                'my_active': my_stats.get('active_players', 0),
+                'my_injured': my_stats.get('injured_players', 0),
+                'opp_active': opp_stats.get('active_players', 0),
+                'opp_injured': opp_stats.get('injured_players', 0)
+            },
+            'schedule_based': games_per_team is not None
         }
     
     def _fetch_opponent_roster(self, team_key: str) -> Optional[List[Dict]]:
@@ -114,6 +191,8 @@ class OpponentAnalyzer:
                             player_info['player_key'] = sub_item['player_key']
                         if 'name' in sub_item:
                             player_info['name'] = sub_item['name']['full']
+                        if 'status' in sub_item:
+                            player_info['injury_status'] = sub_item['status']
             elif isinstance(item, dict):
                 if 'player_stats' in item:
                     stats_data = item['player_stats']
@@ -147,12 +226,96 @@ class OpponentAnalyzer:
         
         return stats
     
-    def _get_team_stats(self, roster: List[Dict]) -> Dict:
+    @retry_on_failure(max_retries=2, delay_seconds=1.0)
+    @safe_api_call
+    def _get_games_per_team(self, week_start: str, week_end: str) -> Dict[str, int]:
+        """
+        Get number of games each NBA team plays during the week from ESPN API.
+        Includes caching, rate limiting, and error handling.
+        
+        Args:
+            week_start: Week start date (YYYY-MM-DD)
+            week_end: Week end date (YYYY-MM-DD)
+        
+        Returns:
+            Dict mapping team abbreviation to game count
+        """
+        # Check cache first (24 hour TTL)
+        if cache:
+            cache_key = f"nba_schedule_{week_start}_{week_end}"
+            cached_data = cache.get(cache_key, max_age_seconds=86400)
+            if cached_data:
+                logger.info(f"Using cached schedule data for {week_start}")
+                return cached_data
+        
+        try:
+            import requests
+            from collections import defaultdict
+            from datetime import datetime, timedelta
+            
+            logger.info(f"Fetching NBA schedule from ESPN API: {week_start} to {week_end}")
+            
+            # ESPN API endpoint (FREE, no key needed)
+            games_count = defaultdict(int)
+            
+            start_date = datetime.strptime(week_start, '%Y-%m-%d')
+            end_date = datetime.strptime(week_end, '%Y-%m-%d')
+            
+            current_date = start_date
+            while current_date <= end_date:
+                # Rate limit check
+                espn_rate_limiter.wait_if_needed()
+                
+                date_str = current_date.strftime('%Y%m%d')
+                url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates={date_str}"
+                
+                response = requests.get(url, timeout=10)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    events = data.get('events', [])
+                    
+                    for event in events:
+                        competitions = event.get('competitions', [])
+                        for comp in competitions:
+                            competitors = comp.get('competitors', [])
+                            
+                            for team_data in competitors:
+                                team_abbrev = team_data.get('team', {}).get('abbreviation')
+                                if team_abbrev:
+                                    games_count[team_abbrev] += 1
+                else:
+                    logger.warning(f"ESPN API returned {response.status_code} for {date_str}")
+                
+                current_date += timedelta(days=1)
+            
+            result = dict(games_count) if games_count else {}
+            
+            # Cache the result
+            if cache and result:
+                cache.set(cache_key, result)
+                logger.info(f"Cached schedule data: {len(result)} teams")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Failed to fetch NBA schedule: {e}")
+            # Fallback: return empty dict (will use default 3.5)
+            print(f"    ⚠️  Could not fetch NBA schedule: {e}")
+            return {}
+    
+    def _get_team_stats(self, roster: List[Dict], exclude_injured: bool = True, 
+                       games_per_team: Optional[Dict[str, float]] = None) -> Dict:
         """
         Aggregate team stats from roster.
         
+        Args:
+            roster: List of players with stats
+            exclude_injured: If True, exclude OUT/GTD/INJ players (default: True)
+            games_per_team: Dict of team abbrev -> games this week (for weighting)
+        
         For percentages (FG%, FT%): Calculate weighted average
-        For counting stats: Sum totals
+        For counting stats: Sum totals weighted by games played
         """
         team_stats = {
             'FG%': [],  # Store individual values for weighted avg
@@ -163,26 +326,48 @@ class OpponentAnalyzer:
             'AST': 0,
             'ST': 0,
             'BLK': 0,
-            'TO': 0
+            'TO': 0,
+            'active_players': 0,
+            'injured_players': 0
         }
         
+        injured_statuses = ['OUT', 'O', 'INJ', 'GTD', 'DTD', 'Suspension', 'IL']
+        
         for player in roster:
+            # Check injury status
+            injury_status = player.get('injury_status')
+            
+            if exclude_injured and injury_status and any(status in str(injury_status).upper() for status in injured_statuses):
+                team_stats['injured_players'] += 1
+                continue  # Skip this player
+            
+            team_stats['active_players'] += 1
             stats = player.get('stats', {})
             
-            # Collect percentage stats for averaging
+            # Get game multiplier for this player's team
+            player_team = player.get('team', 'UNK')
+            # Normalize team abbreviation
+            player_team = self.team_abbrev_map.get(player_team, player_team)
+            
+            game_multiplier = 1.0
+            if games_per_team and player_team in games_per_team:
+                # Divide by average games per week (3.5) to normalize
+                game_multiplier = games_per_team[player_team] / 3.5
+            
+            # Collect percentage stats for averaging (not affected by games)
             if stats.get('FG%', 0) > 0:
                 team_stats['FG%'].append(stats['FG%'])
             if stats.get('FT%', 0) > 0:
                 team_stats['FT%'].append(stats['FT%'])
             
-            # Sum counting stats
-            team_stats['3PTM'] += stats.get('3PTM', 0)
-            team_stats['PTS'] += stats.get('PTS', 0)
-            team_stats['REB'] += stats.get('REB', 0)
-            team_stats['AST'] += stats.get('AST', 0)
-            team_stats['ST'] += stats.get('ST', 0)
-            team_stats['BLK'] += stats.get('BLK', 0)
-            team_stats['TO'] += stats.get('TO', 0)
+            # Sum counting stats (weighted by games if available)
+            team_stats['3PTM'] += stats.get('3PTM', 0) * game_multiplier
+            team_stats['PTS'] += stats.get('PTS', 0) * game_multiplier
+            team_stats['REB'] += stats.get('REB', 0) * game_multiplier
+            team_stats['AST'] += stats.get('AST', 0) * game_multiplier
+            team_stats['ST'] += stats.get('ST', 0) * game_multiplier
+            team_stats['BLK'] += stats.get('BLK', 0) * game_multiplier
+            team_stats['TO'] += stats.get('TO', 0) * game_multiplier
         
         # Calculate average percentages
         if team_stats['FG%']:
@@ -299,9 +484,17 @@ class OpponentAnalyzer:
             return f"⚠️ Opponent analysis unavailable: {analysis['error']}"
         
         classification = analysis['classification']
+        injury_info = analysis.get('injury_info', {})
         lines = []
         
         lines.append("CATEGORY ANALYSIS:")
+        
+        # Add injury disclaimer if applicable
+        if injury_info:
+            my_injured = injury_info.get('my_injured', 0)
+            opp_injured = injury_info.get('opp_injured', 0)
+            if my_injured > 0 or opp_injured > 0:
+                lines.append(f"(Excluding injured: You={my_injured}, Opp={opp_injured})")
         
         if classification['dominating']:
             cats = [f"{c['category']} (+{c['gap']:.0f}%)" for c in classification['dominating']]

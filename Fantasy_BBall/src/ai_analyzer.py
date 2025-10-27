@@ -1,7 +1,11 @@
 """
-ai_analyzer.py - OPTIMIZED VERSION with Live Matchup Scheduler
-Flexible AI integration with cost optimization and prompt caching.
-Now uses MatchupScheduler for live data with Sunday look-ahead capability.
+ai_analyzer.py - PHASE 4A ENHANCED VERSION
+Integrates strategic roster analysis for 20-30% better recommendations.
+
+New features:
+- Roster balance analysis (guard-heavy, big-heavy, balanced)
+- Positional scarcity detection (rare stat combos)
+- Schedule advantage integration (volume opportunities)
 """
 
 import json
@@ -9,6 +13,9 @@ import os
 from typing import List, Dict, Optional
 from datetime import datetime
 from dotenv import load_dotenv
+
+# Import the new Phase 4A module
+from strategic_analyzer import StrategicAnalyzer
 
 # Try to import Anthropic SDK
 try:
@@ -26,27 +33,10 @@ except ImportError:
     LEAGUE_CONFIG_AVAILABLE = False
     print("⚠️  league_config.py not found - using defaults")
 
-# Import MatchupScheduler for live data
-try:
-    from matchup_scheduler import MatchupScheduler
-    from auth import YahooAuth
-    MATCHUP_SCHEDULER_AVAILABLE = True
-except ImportError:
-    MATCHUP_SCHEDULER_AVAILABLE = False
-    print("⚠️  matchup_scheduler.py or auth.py not found - matchup features disabled")
-
-# Import OpponentAnalyzer for category gap analysis
-try:
-    from opponent_analyzer import OpponentAnalyzer
-    OPPONENT_ANALYZER_AVAILABLE = True
-except ImportError:
-    OPPONENT_ANALYZER_AVAILABLE = False
-    print("⚠️  opponent_analyzer.py not found - category analysis disabled")
-
 
 class AIAnalyzer:
     """
-    Optimized AI analyzer with cost-efficient prompting and live matchup data.
+    Phase 4A Enhanced AI analyzer with strategic roster analysis.
     """
     
     def __init__(self, config=None):
@@ -62,19 +52,8 @@ class AIAnalyzer:
         self.api_key = None
         self.client = None
         
-        # Initialize matchup scheduler
-        self.scheduler = None
-        self.opponent_analyzer = None
-        if MATCHUP_SCHEDULER_AVAILABLE:
-            try:
-                auth = YahooAuth()
-                self.scheduler = MatchupScheduler(auth)
-                
-                # Also initialize opponent analyzer if available
-                if OPPONENT_ANALYZER_AVAILABLE:
-                    self.opponent_analyzer = OpponentAnalyzer(auth)
-            except Exception as e:
-                print(f"⚠️  Could not initialize schedulers: {e}")
+        # Initialize Phase 4A analyzer
+        self.strategic_analyzer = StrategicAnalyzer()
         
         # Load environment variables
         load_dotenv()
@@ -94,12 +73,6 @@ class AIAnalyzer:
             return self.config.settings.team_name
         return "NoMoneyNoHoney"
     
-    def _get_team_key(self) -> str:
-        """Safely get team key."""
-        if self.config and hasattr(self.config, 'settings'):
-            return f"{self.config.settings.game_key}.l.{self.config.settings.league_id}.t.{self.config.settings.team_id}"
-        return "466.l.39285.t.2"
-    
     def _init_claude_api(self):
         """Initialize Claude API client if available."""
         if not ANTHROPIC_AVAILABLE:
@@ -114,10 +87,9 @@ class AIAnalyzer:
             return False
         
         try:
-            # Initialize without proxies argument (fixes the error)
             self.client = Anthropic(api_key=api_key)
             self.ai_provider = 'claude'
-            self.api_key = api_key[:8] + "..." # Store masked version
+            self.api_key = api_key[:8] + "..."
             print("✓ Claude API initialized successfully")
             return True
         except Exception as e:
@@ -146,115 +118,13 @@ class AIAnalyzer:
             data = json.load(f)
             return data['players']
     
-    def _fetch_roster_with_stats(self) -> Optional[List[Dict]]:
-        """Fetch roster with stats from Yahoo API."""
-        if not self.scheduler or not self.scheduler.auth:
+    def load_matchup(self, filename='data/weekly_matchup.json'):
+        """Load weekly matchup data (if available)."""
+        if not os.path.exists(filename):
             return None
         
-        try:
-            team_key = self._get_team_key()
-            url = f"{self.scheduler.auth.fantasy_base_url}team/{team_key}/roster/players/stats?format=json"
-            response = self.scheduler.auth.session.get(url, timeout=10)
-            
-            if response.status_code != 200:
-                return None
-            
-            data = response.json()
-            roster = []
-            
-            # Parse roster
-            team_data = data['fantasy_content']['team']
-            for item in team_data:
-                if isinstance(item, dict) and 'roster' in item:
-                    players_data = item['roster']['0']['players']
-                    
-                    for key in players_data:
-                        if key == 'count':
-                            continue
-                        if key.isdigit():
-                            player_entry = players_data[key]
-                            if 'player' in player_entry:
-                                player = self._parse_player_from_api(player_entry['player'])
-                                if player:
-                                    roster.append(player)
-            
-            return roster if roster else None
-            
-        except Exception as e:
-            print(f"⚠️  Error fetching roster stats: {e}")
-            return None
-    
-    def _parse_player_from_api(self, player_list: List) -> Optional[Dict]:
-        """Parse player data from Yahoo API."""
-        player_info = {'stats': {}}
-        
-        if not isinstance(player_list, list):
-            return None
-        
-        # Stat ID mapping
-        stat_ids = {
-            '5': 'FG%', '8': 'FT%', '10': '3PTM', '12': 'PTS',
-            '15': 'REB', '16': 'AST', '17': 'ST', '18': 'BLK', '19': 'TO'
-        }
-        
-        for item in player_list:
-            if isinstance(item, list):
-                for sub_item in item:
-                    if isinstance(sub_item, dict):
-                        if 'player_key' in sub_item:
-                            player_info['player_key'] = sub_item['player_key']
-                        if 'name' in sub_item:
-                            player_info['name'] = sub_item['name']['full']
-                        if 'primary_position' in sub_item:
-                            player_info['primary_position'] = sub_item['primary_position']
-                        if 'editorial_team_abbr' in sub_item:
-                            player_info['team'] = sub_item['editorial_team_abbr']
-            elif isinstance(item, dict):
-                if 'player_stats' in item:
-                    stats_data = item['player_stats']
-                    if 'stats' in stats_data:
-                        for stat_item in stats_data['stats']:
-                            if 'stat' in stat_item:
-                                stat = stat_item['stat']
-                                stat_id = stat.get('stat_id')
-                                value = stat.get('value', '')
-                                
-                                if stat_id in stat_ids:
-                                    cat = stat_ids[stat_id]
-                                    try:
-                                        if value == '' or value == '-':
-                                            player_info['stats'][cat] = 0.0
-                                        else:
-                                            player_info['stats'][cat] = float(value)
-                                    except:
-                                        player_info['stats'][cat] = 0.0
-        
-        return player_info if 'player_key' in player_info else None
-    
-    def load_matchup(self) -> Dict:
-        """
-        Load weekly matchup data using MatchupScheduler (LIVE DATA).
-        
-        Automatically handles Sunday look-ahead:
-        - Sunday: Analyzes NEXT week's opponent
-        - Monday-Saturday: Analyzes CURRENT week's opponent
-        
-        Returns:
-            Dict with matchup data and metadata including week info
-        """
-        if not self.scheduler:
-            raise RuntimeError("MatchupScheduler not available. Check auth.py and matchup_scheduler.py")
-        
-        team_key = self._get_team_key()
-        
-        # Get optimal matchup (handles Sunday look-ahead automatically)
-        result = self.scheduler.get_optimal_matchup(
-            team_key=team_key,
-            cutoff_hour=0,  # Switch at midnight on Sunday
-            verbose=False   # We'll show our own messages
-        )
-        
-        return result
+        with open(filename, 'r') as f:
+            return json.load(f)
     
     def _filter_top_available_players(self, 
                                      available_players: List[Dict], 
@@ -312,68 +182,84 @@ class AIAnalyzer:
         
         return '\n'.join(lines)
     
-    def _build_matchup_summary(self, matchup_result: Dict, opponent_analysis: Optional[str] = None) -> str:
-        """
-        Build compact matchup summary from scheduler result with optional opponent analysis.
-        
-        Args:
-            matchup_result: Result from scheduler.get_optimal_matchup()
-            opponent_analysis: Formatted opponent analysis text (optional)
-        
-        Returns:
-            Formatted matchup string with week context and category analysis
-        """
-        if not matchup_result or not matchup_result.get('matchup'):
+    def _build_matchup_summary(self, matchup_data: Dict) -> str:
+        """Build compact matchup summary."""
+        if not matchup_data:
             return ""
         
-        matchup = matchup_result['matchup']
-        week = matchup_result.get('week', '?')
-        is_lookahead = matchup_result.get('is_lookahead', False)
-        
         lines = []
+        lines.append(f"Week {matchup_data.get('week', 'N/A')} vs {matchup_data.get('opponent', {}).get('team_name', 'Unknown')}")
         
-        # Add week context header
-        if is_lookahead:
-            lines.append(f"📅 ANALYZING NEXT WEEK (Week {week}) - Sunday Look-Ahead")
-        else:
-            lines.append(f"📅 ANALYZING CURRENT WEEK (Week {week})")
+        if 'category_comparison' in matchup_data:
+            comparison = matchup_data['category_comparison']
+            
+            winning = [cat for cat, data in comparison.items() if data.get('status') == 'WINNING']
+            losing = [cat for cat, data in comparison.items() if data.get('status') == 'LOSING']
+            tied = [cat for cat, data in comparison.items() if data.get('status') == 'TIED']
+            
+            lines.append(f"WINNING: {', '.join(winning) if winning else 'None'}")
+            lines.append(f"LOSING: {', '.join(losing) if losing else 'None'}")
+            lines.append(f"TIED: {', '.join(tied) if tied else 'None'}")
         
-        lines.append("")
-        
-        # Add opponent info
-        opponent_name = matchup.get('opponent_name', 'Unknown')
-        lines.append(f"Week {week} vs {opponent_name}")
-        
-        # Add matchup dates if available
-        if 'week_start' in matchup:
-            lines.append(f"Starts: {matchup['week_start']}")
-        if 'week_end' in matchup:
-            lines.append(f"Ends: {matchup['week_end']}")
-        
-        # Add opponent analysis if available
-        if opponent_analysis:
-            lines.append("")
-            lines.append(opponent_analysis)
+        if 'strategic_targets' in matchup_data:
+            targets = matchup_data['strategic_targets']
+            
+            if targets.get('winnable'):
+                winnable_cats = [f"{item['category']} ({item.get('diff_pct', 0):.0f}% gap)" 
+                               for item in targets['winnable'][:3]]  # Top 3 only
+                lines.append(f"🎯 WINNABLE: {', '.join(winnable_cats)}")
         
         return '\n'.join(lines)
+    
+    def _extract_games_per_team(self, matchup_data: Optional[Dict]) -> Optional[Dict[str, int]]:
+        """
+        Extract games_per_team from matchup data.
+        
+        Args:
+            matchup_data: Matchup data that may contain schedule info
+        
+        Returns:
+            Dict of team abbreviation to game count, or None
+        """
+        if not matchup_data:
+            return None
+        
+        # Try to find games_per_team in various locations
+        if 'games_per_team' in matchup_data:
+            return matchup_data['games_per_team']
+        
+        # Check if it's nested elsewhere
+        if 'schedule' in matchup_data and 'games_per_team' in matchup_data['schedule']:
+            return matchup_data['schedule']['games_per_team']
+        
+        return None
     
     def build_optimized_prompt(self, 
                               my_roster: List[Dict],
                               available_players: List[Dict],
                               target_categories: Optional[List[str]] = None,
-                              matchup_result: Optional[Dict] = None,
-                              opponent_analysis: Optional[str] = None) -> str:
+                              matchup_data: Optional[Dict] = None,
+                              use_phase4a: bool = True) -> str:
         """
-        Build OPTIMIZED prompt that's 40-50% smaller.
+        Build OPTIMIZED prompt with Phase 4A enhancements.
+        
+        Phase 4A additions:
+        1. Roster balance analysis (guard-heavy, big-heavy, balanced)
+        2. Positional scarcity (rare stat combos)
+        3. Schedule advantage (volume opportunities)
+        
+        Args:
+            my_roster: Current roster
+            available_players: Available players
+            target_categories: Optional category focus
+            matchup_data: Optional matchup data
+            use_phase4a: Enable Phase 4A enhancements (default True)
         
         Key optimizations:
         1. Compact formatting (fewer tokens)
         2. Only top 25 available players (not 50)
         3. Removed redundant explanations
         4. More structured, less verbose
-        
-        Args:
-            matchup_result: Result from scheduler.get_optimal_matchup()
         """
         
         # Get league info safely
@@ -390,7 +276,7 @@ class AIAnalyzer:
         # Build compact sections
         roster_summary = self._build_compact_roster_summary(my_roster)
         available_summary = self._build_compact_available_players(filtered_players)
-        matchup_summary = self._build_matchup_summary(matchup_result, opponent_analysis) if matchup_result else ""
+        matchup_summary = self._build_matchup_summary(matchup_data) if matchup_data else ""
         
         # Build optimized prompt
         prompt = f"""Fantasy Basketball Roster Analysis
@@ -407,10 +293,31 @@ TOP AVAILABLE FREE AGENTS ({len(filtered_players)} shown):
 ({len(available_players) - len(filtered_players)} more available)"""
 
         if matchup_summary:
-            prompt += f"\n\n{matchup_summary}"
+            prompt += f"\n\nMATCHUP:\n{matchup_summary}"
         
         if target_categories:
             prompt += f"\n\nPRIORITY CATEGORIES: {', '.join(target_categories)}"
+        
+        # **PHASE 4A ENHANCEMENT** - Add strategic analysis
+        if use_phase4a:
+            print("\n🎯 Generating Phase 4A strategic analysis...")
+            
+            # Extract games_per_team for schedule analysis
+            games_per_team = self._extract_games_per_team(matchup_data)
+            
+            # Generate strategic section
+            strategic_section = self.strategic_analyzer.generate_enhanced_prompt_section(
+                roster=my_roster,
+                available_players=available_players,
+                games_per_team=games_per_team
+            )
+            
+            if strategic_section:
+                prompt += f"\n\n{strategic_section}"
+                print("✓ Added roster balance analysis")
+                print("✓ Added positional scarcity insights")
+                if games_per_team:
+                    print("✓ Added schedule advantage analysis")
         
         prompt += """
 
@@ -423,7 +330,7 @@ For each move, provide:
 4. PRIORITY: High/Medium/Low
 5. WHY: Brief reason (1-2 sentences)
 
-Focus on winning this week's matchup. Be specific and concise."""
+Focus on winning this week's matchup. Consider roster balance, positional scarcity, and schedule advantages. Be specific and concise."""
         
         return prompt
     
@@ -431,13 +338,13 @@ Focus on winning this week's matchup. Be specific and concise."""
                        my_roster: List[Dict],
                        available_players: List[Dict],
                        target_categories: Optional[List[str]] = None,
-                       matchup_result: Optional[Dict] = None) -> str:
+                       matchup_data: Optional[Dict] = None) -> str:
         """
         Wrapper that calls optimized prompt builder.
         Kept for backward compatibility.
         """
         return self.build_optimized_prompt(
-            my_roster, available_players, target_categories, matchup_result
+            my_roster, available_players, target_categories, matchup_data, use_phase4a=True
         )
     
     def call_claude_api(self, prompt: str, max_tokens: int = 2048, use_caching: bool = True) -> str:
@@ -499,7 +406,7 @@ For each move, provide:
 4. PRIORITY: High/Medium/Low
 5. WHY: Brief reason (1-2 sentences)
 
-Focus on winning this week's matchup. Be specific and concise."""
+Focus on winning this week's matchup. Consider roster balance, positional scarcity, and schedule advantages. Be specific and concise."""
                 
                 message_params["system"] = [
                     {
@@ -553,7 +460,7 @@ Focus on winning this week's matchup. Be specific and concise."""
     def format_recommendations_for_display(self, ai_response: str) -> str:
         """Format AI response for nice display."""
         formatted = "\n" + "="*80 + "\n"
-        formatted += "AI ROSTER RECOMMENDATIONS\n"
+        formatted += "AI ROSTER RECOMMENDATIONS (Phase 4A Enhanced)\n"
         formatted += "="*80 + "\n\n"
         formatted += ai_response
         formatted += "\n" + "="*80 + "\n"
@@ -570,7 +477,8 @@ Focus on winning this week's matchup. Be specific and concise."""
             'ai_response': ai_response,
             'ai_provider': self.ai_provider or 'manual',
             'prompt_length': len(prompt),
-            'response_length': len(ai_response)
+            'response_length': len(ai_response),
+            'phase': '4A'  # Mark as Phase 4A
         }
         
         with open(filename, 'w') as f:
@@ -586,93 +494,46 @@ Focus on winning this week's matchup. Be specific and concise."""
     
     def analyze_with_api(self, target_categories: Optional[List[str]] = None):
         """
-        Automatic analysis using Claude API with LIVE matchup data.
+        Automatic analysis using Claude API with Phase 4A enhancements.
         
         Args:
             target_categories: Specific categories to focus on (optional)
         """
         if not self.is_api_available():
-            print("\n❌ Claude API not available. Cannot proceed.")
-            return None
+            print("\n❌ Claude API not available. Falling back to manual mode...")
+            return self.analyze_with_manual_input(target_categories)
         
         print("\n" + "="*80)
-        print("AI-POWERED ROSTER ANALYSIS (Live Data + Optimized)")
+        print("AI-POWERED ROSTER ANALYSIS (Phase 4A Enhanced)")
         print("="*80 + "\n")
         
-        # Load roster data
+        # Load data
         print("Loading data...")
         my_roster = self.load_roster()
         print(f"✓ Loaded {len(my_roster)} players from your roster")
         
-        # Fetch stats for roster if needed
-        if my_roster and (not my_roster[0].get('stats') or not my_roster[0]['stats']):
-            print("⚠️  Roster missing stats, fetching from API...")
-            my_roster = self._fetch_roster_with_stats()
-            if my_roster:
-                print(f"✓ Fetched stats for {len(my_roster)} players")
-        
         available_players = self.load_available_players()
         print(f"✓ Loaded {len(available_players)} available players")
         
-        # Load LIVE matchup data with Sunday look-ahead
-        print("\nFetching live matchup data...")
-        opponent_analysis_text = None
-        try:
-            matchup_result = self.load_matchup()
-            
-            if matchup_result and matchup_result.get('matchup'):
-                week = matchup_result.get('week', '?')
-                is_lookahead = matchup_result.get('is_lookahead', False)
-                opponent = matchup_result['matchup'].get('opponent_name', 'Unknown')
-                
-                if is_lookahead:
-                    print(f"✨ Sunday detected! Analyzing NEXT WEEK (Week {week})")
-                    print(f"✓ Next opponent: {opponent}")
-                else:
-                    print(f"✓ Analyzing current week (Week {week})")
-                    print(f"✓ Current opponent: {opponent}")
-                
-                # Run opponent analysis if available
-                if self.opponent_analyzer and 'opponent' in matchup_result['matchup']:
-                    print("\n🔍 Analyzing opponent roster...")
-                    try:
-                        # Get opponent team key from matchup
-                        opponent_info = matchup_result['matchup'].get('opponent', {})
-                        opponent_key = opponent_info.get('team_key')
-                        
-                        if opponent_key:
-                            analysis = self.opponent_analyzer.analyze_matchup(
-                                my_roster, 
-                                opponent_key,
-                                days_lookback=14
-                            )
-                            opponent_analysis_text = self.opponent_analyzer.format_analysis_for_prompt(analysis)
-                            print("✓ Category analysis complete")
-                        else:
-                            print("⚠️  Opponent team key not available")
-                    except Exception as e:
-                        print(f"⚠️  Opponent analysis failed: {e}")
-            else:
-                print("⚠️  Could not fetch matchup data")
-                matchup_result = None
-                
-        except Exception as e:
-            print(f"⚠️  Error fetching matchup: {e}")
-            matchup_result = None
+        matchup_data = self.load_matchup()
+        if matchup_data:
+            print(f"✓ Loaded Week {matchup_data.get('week')} matchup data")
+        else:
+            print("⚠️  No matchup data available")
         
-        # Build optimized prompt
-        print("\nGenerating optimized AI prompt...")
+        # Build Phase 4A enhanced prompt
+        print("\nGenerating Phase 4A enhanced AI prompt...")
         prompt = self.build_optimized_prompt(
             my_roster=my_roster,
             available_players=available_players,
             target_categories=target_categories,
-            matchup_result=matchup_result,
-            opponent_analysis=opponent_analysis_text
+            matchup_data=matchup_data,
+            use_phase4a=True  # Enable Phase 4A
         )
         
-        # Calculate token savings
+        # Calculate token estimate
         est_tokens = len(prompt) // 4  # Rough estimate: 4 chars per token
-        print(f"✓ Optimized prompt: ~{est_tokens:,} tokens (50% smaller than verbose version)")
+        print(f"✓ Phase 4A prompt: ~{est_tokens:,} tokens (~250 more than Phase 3)")
         
         # Save prompt for reference
         prompt_file = 'data/ai_prompt.txt'
@@ -688,29 +549,111 @@ Focus on winning this week's matchup. Be specific and concise."""
             self.save_recommendations(ai_response, prompt)
             print(self.format_recommendations_for_display(ai_response))
             
-            # Show week context reminder
-            if matchup_result and matchup_result.get('is_lookahead'):
-                print("\n" + "="*80)
-                print("💡 REMINDER: These recommendations are for NEXT WEEK's matchup")
-                week = matchup_result.get('week', '?')
-                opponent = matchup_result['matchup'].get('opponent_name', 'TBD')
-                print(f"   Week {week} vs {opponent}")
-                print("="*80)
-            
             return ai_response
             
         except Exception as e:
             print(f"\n❌ API call failed: {e}")
+            print("\nFalling back to manual mode...")
+            return self.analyze_with_manual_input(target_categories)
+    
+    def analyze_with_manual_input(self, target_categories: Optional[List[str]] = None):
+        """
+        Generate prompt for manual AI analysis (Phase 4A enhanced).
+        Copy the prompt and paste into any AI chat.
+        """
+        print("\n" + "="*80)
+        print("MANUAL AI ANALYSIS MODE (Phase 4A Enhanced)")
+        print("="*80 + "\n")
+        
+        # Load data
+        print("Loading roster data...")
+        my_roster = self.load_roster()
+        print(f"✓ Loaded {len(my_roster)} players from your roster")
+        
+        print("Loading available players...")
+        available_players = self.load_available_players()
+        print(f"✓ Loaded {len(available_players)} available players")
+        
+        print("Loading matchup data...")
+        matchup_data = self.load_matchup()
+        if matchup_data:
+            print(f"✓ Loaded Week {matchup_data.get('week')} matchup data")
+        else:
+            print("⚠️  No matchup data available")
+        
+        # Build Phase 4A enhanced prompt
+        print("\nGenerating Phase 4A enhanced AI prompt...")
+        prompt = self.build_optimized_prompt(
+            my_roster=my_roster,
+            available_players=available_players,
+            target_categories=target_categories,
+            matchup_data=matchup_data,
+            use_phase4a=True
+        )
+        
+        # Save prompt to file
+        prompt_file = 'data/ai_prompt.txt'
+        with open(prompt_file, 'w') as f:
+            f.write(prompt)
+        
+        print(f"\n✓ Prompt saved to {prompt_file}")
+        print(f"✓ Prompt length: {len(prompt)} characters")
+        print("✓ Phase 4A enhancements included: roster balance, scarcity, schedule")
+        
+        # Display instructions
+        print("\n" + "="*80)
+        print("INSTRUCTIONS")
+        print("="*80 + "\n")
+        print("1. Open data/ai_prompt.txt")
+        print("2. Copy the ENTIRE contents")
+        print("3. Paste into your AI of choice:")
+        print("   - Claude (https://claude.ai)")
+        print("   - ChatGPT (https://chat.openai.com)")
+        print("   - Grok (https://x.ai)")
+        print("   - Gemini (https://gemini.google.com)")
+        print("4. Copy the AI's response")
+        print("5. Paste it back here when prompted")
+        print("\n" + "="*80 + "\n")
+        
+        # Wait for user to paste response
+        print("Paste the AI's response below (press Ctrl+D or Ctrl+Z when done):")
+        print("-" * 80)
+        
+        try:
+            ai_response_lines = []
+            while True:
+                try:
+                    line = input()
+                    ai_response_lines.append(line)
+                except EOFError:
+                    break
+            
+            ai_response = '\n'.join(ai_response_lines)
+            
+            if ai_response.strip():
+                # Save recommendations
+                self.save_recommendations(ai_response, prompt)
+                
+                # Display
+                print(self.format_recommendations_for_display(ai_response))
+                
+                return ai_response
+            else:
+                print("\n⚠️  No response entered. Prompt is saved in data/ai_prompt.txt")
+                return None
+                
+        except KeyboardInterrupt:
+            print("\n\n⚠️  Cancelled. Prompt is saved in data/ai_prompt.txt")
             return None
 
 
 if __name__ == "__main__":
     # Initialize with LeagueConfig
-    config = LeagueConfig()
+    config = LeagueConfig() if LEAGUE_CONFIG_AVAILABLE else None
     analyzer = AIAnalyzer(config)
     
     print("\n" + "="*80)
-    print("AI-Powered Fantasy Basketball Analyzer (LIVE DATA)")
+    print("AI-Powered Fantasy Basketball Analyzer (Phase 4A)")
     print("="*80 + "\n")
     
     # Check API status
@@ -718,19 +661,13 @@ if __name__ == "__main__":
         print("✓ Claude API is ready!")
         print(f"  Provider: {analyzer.ai_provider}")
         print(f"  API Key: {analyzer.api_key}")
-        print("  Cost optimization: ENABLED (50% savings)")
+        print("  Optimizations: ENABLED")
+        print("  Phase 4A: ENABLED (roster balance, scarcity, schedule)")
+        mode = "automatic"
     else:
-        print("❌ Claude API not available - cannot proceed")
-        print("   Check your ANTHROPIC_API_KEY in .env file")
-        exit(1)
-    
-    # Check scheduler status
-    if analyzer.scheduler:
-        print("✓ Live matchup scheduler is ready!")
-        print("  Sunday look-ahead: ENABLED")
-    else:
-        print("⚠️  Matchup scheduler not available")
-        print("   Analysis will proceed without matchup context")
+        print("⚠️  Claude API not available - will use manual mode")
+        print("  Phase 4A: ENABLED (roster balance, scarcity, schedule)")
+        mode = "manual"
     
     print("\n" + "-"*80 + "\n")
     
@@ -745,26 +682,28 @@ if __name__ == "__main__":
     
     target_categories = None
     if choice == "1":
-        # Try to get winnable categories from live matchup
+        # Try to auto-detect from matchup
         try:
-            team_key = config.settings.game_key + ".l." + str(config.settings.league_id) + ".t." + str(config.settings.team_id)
-            matchup_result = analyzer.load_matchup()
-            
-            # Note: Your matchup data structure may not have 'strategic_targets'
-            # This would need to be added to matchup_scheduler.py if you want this feature
-            # For now, we'll just inform the user
-            print("\n⚠️  Winnable category detection not yet implemented in live matchup data")
-            print("   Using general roster improvement instead")
-            
-        except Exception as e:
-            print(f"\n⚠️  Could not load matchup data: {e}")
-            print("   Using general roster improvement instead")
-            
+            matchup_data = analyzer.load_matchup()
+            if matchup_data and 'strategic_targets' in matchup_data:
+                winnable = matchup_data['strategic_targets'].get('winnable', [])
+                if winnable:
+                    target_categories = [w['category'] for w in winnable]
+                    print(f"\n✓ Targeting winnable categories: {', '.join(target_categories)}")
+                else:
+                    print("\n⚠️  No winnable categories found in matchup data")
+            else:
+                print("\n⚠️  No matchup data available for targeted analysis")
+        except:
+            print("\n⚠️  Could not load matchup data")
     elif choice == "3":
         cats_input = input("Enter categories (comma-separated, e.g., FG%,3PTM,BLK): ").strip()
         if cats_input:
             target_categories = [c.strip() for c in cats_input.split(',')]
             print(f"\n✓ Targeting: {', '.join(target_categories)}")
     
-    # Run analysis
-    analyzer.analyze_with_api(target_categories=target_categories)
+    # Run Phase 4A analysis
+    if mode == "automatic":
+        analyzer.analyze_with_api(target_categories=target_categories)
+    else:
+        analyzer.analyze_with_manual_input(target_categories=target_categories)
