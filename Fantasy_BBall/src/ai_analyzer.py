@@ -51,6 +51,24 @@ except ImportError:
     STRATEGIC_ANALYZER_AVAILABLE = False
     print("⚠️  strategic_analyzer.py not found - Phase 4A features disabled")
 
+# Import OpponentAnalyzer for schedule and category analysis
+try:
+    from opponent_analyzer import OpponentAnalyzer
+    OPPONENT_ANALYZER_AVAILABLE = True
+except ImportError:
+    OPPONENT_ANALYZER_AVAILABLE = False
+    print("⚠️  opponent_analyzer.py not found - schedule features disabled")
+
+# Import caching utilities
+try:
+    from util import cache, logger
+    CACHE_AVAILABLE = True
+except ImportError:
+    CACHE_AVAILABLE = False
+    cache = None
+    logger = None
+    print("⚠️  util.py caching not available")
+
 
 class AIAnalyzer:
     """
@@ -63,18 +81,22 @@ class AIAnalyzer:
     """
     
     def __init__(self, config=None):
-        print("\n[DEBUG] Initializing AIAnalyzer...")
+        if logger:
+            logger.debug("Initializing AIAnalyzer...")
         
         # Handle config
         if config:
             self.config = config
-            print(f"[DEBUG] Using provided config")
+            if logger:
+                logger.debug("Using provided config")
         elif LEAGUE_CONFIG_AVAILABLE:
             self.config = LeagueConfig()
-            print(f"[DEBUG] Loaded LeagueConfig")
+            if logger:
+                logger.debug("Loaded LeagueConfig")
         else:
             self.config = None
-            print(f"[DEBUG] No config available")
+            if logger:
+                logger.debug("No config available")
         
         self.ai_provider = None
         self.api_key = None
@@ -86,6 +108,7 @@ class AIAnalyzer:
         self.player_fetcher = None
         self.matchup_analyzer = None
         self.matchup_scheduler = None
+        self.opponent_analyzer = None
         
         if DATA_FETCHERS_AVAILABLE and self.config:
             try:
@@ -94,6 +117,12 @@ class AIAnalyzer:
                 self.player_fetcher = PlayerFetcher(self.auth)
                 self.matchup_analyzer = MatchupAnalyzer(self.auth, self.config)
                 self.matchup_scheduler = MatchupScheduler(self.auth)
+                
+                # Initialize OpponentAnalyzer for schedule data
+                if OPPONENT_ANALYZER_AVAILABLE:
+                    self.opponent_analyzer = OpponentAnalyzer(self.auth)
+                    print(f"[DEBUG] Opponent analyzer initialized")
+                
                 print(f"[DEBUG] Data fetchers initialized")
             except Exception as e:
                 print(f"⚠️  Could not initialize data fetchers: {e}")
@@ -132,6 +161,32 @@ class AIAnalyzer:
             self.config.settings.league_id,
             self.config.settings.team_id
         )
+    
+    def _get_week_dates(self, week_number: int) -> Dict[str, str]:
+        """
+        Calculate week start and end dates for a given week number.
+        
+        Args:
+            week_number: Fantasy week number (1-based)
+        
+        Returns:
+            Dict with 'start' and 'end' date strings (YYYY-MM-DD)
+        """
+        # Fantasy basketball weeks typically start on Monday
+        # Week 1 starts around Oct 21, 2024
+        season_start = datetime(2024, 10, 21)  # Adjust based on actual season start
+        
+        # Calculate week start (Monday of the target week)
+        days_offset = (week_number - 1) * 7
+        week_start = season_start + timedelta(days=days_offset)
+        
+        # Week runs Monday through Sunday (7 days)
+        week_end = week_start + timedelta(days=6)
+        
+        return {
+            'start': week_start.strftime('%Y-%m-%d'),
+            'end': week_end.strftime('%Y-%m-%d')
+        }
     
     def _init_claude_api(self):
         """Initialize Claude API client if available."""
@@ -398,13 +453,29 @@ class AIAnalyzer:
             data = json.load(f)
             return data['roster']
     
-    def fetch_live_available_players(self) -> List[Dict]:
-        """Fetch LIVE available players from Yahoo API."""
+    def fetch_live_available_players(self, use_cache: bool = True) -> List[Dict]:
+        """
+        Fetch LIVE available players from Yahoo API with caching.
+        
+        Args:
+            use_cache: If True, use cached data if available (default: True)
+        
+        Returns:
+            List of available players
+        """
         print("\n[DEBUG] Fetching LIVE available players from Yahoo API...")
         
         if not self.player_fetcher or not self.config:
             print("[DEBUG] Falling back to JSON file")
             return self._load_players_from_file()
+        
+        # Check cache first (30 minute TTL - players don't change that frequently)
+        cache_key = f"available_players_{self.config.settings.league_id}"
+        if use_cache and CACHE_AVAILABLE and cache:
+            cached_data = cache.get(cache_key, max_age_seconds=1800)  # 30 minutes
+            if cached_data:
+                print(f"[DEBUG] ✓ Using cached available players ({len(cached_data)} players)")
+                return cached_data
         
         try:
             print(f"[DEBUG] Fetching all available players...")
@@ -418,6 +489,11 @@ class AIAnalyzer:
             
             if players:
                 print(f"[DEBUG] Successfully fetched {len(players)} available players from Yahoo API")
+                
+                # Cache the data (30 minute TTL)
+                if CACHE_AVAILABLE and cache:
+                    cache.set(cache_key, players)
+                    print(f"[DEBUG] ✓ Cached available players for 30 minutes")
                 
                 # Save for backup
                 os.makedirs('data', exist_ok=True)
@@ -532,6 +608,36 @@ class AIAnalyzer:
             print(f"[DEBUG] Successfully fetched matchup data for Week {target_week}")
             print(f"[DEBUG] Current score: {wins}-{losses}-{ties}")
             
+            # ENHANCEMENT: Fetch schedule data using OpponentAnalyzer
+            if self.opponent_analyzer:
+                print(f"[DEBUG] Fetching schedule data via OpponentAnalyzer...")
+                try:
+                    week_dates = self._get_week_dates(target_week)
+                    
+                    # Get current roster for opponent analysis
+                    # This allows OpponentAnalyzer to validate properly and provide full analysis
+                    current_roster = self.roster_analyzer.get_my_roster(
+                        league_id,
+                        team_id
+                    ) if self.roster_analyzer else []
+                    
+                    schedule_analysis = self.opponent_analyzer.analyze_matchup(
+                        my_roster=current_roster,
+                        opponent_team_key=opponent_team_key,
+                        week_start=week_dates['start'],
+                        week_end=week_dates['end']
+                    )
+                    
+                    if schedule_analysis and 'games_per_team' in schedule_analysis:
+                        matchup_data['games_per_team'] = schedule_analysis['games_per_team']
+                        num_teams = len(schedule_analysis['games_per_team'])
+                        print(f"[DEBUG] Got schedule for {num_teams} teams")
+                    else:
+                        print(f"[DEBUG] No schedule data in opponent analysis")
+                        
+                except Exception as e:
+                    print(f"[DEBUG] Could not fetch schedule data: {e}")
+            
             # Save for backup
             os.makedirs('data', exist_ok=True)
             with open('data/weekly_matchup.json', 'w') as f:
@@ -582,15 +688,186 @@ class AIAnalyzer:
         print("[DEBUG] No schedule data available in matchup")
         return None
     
+    def _enrich_players_with_schedule(self, players: List[Dict], 
+                                      games_per_team: Optional[Dict[str, int]]) -> List[Dict]:
+        """
+        Add games_remaining field to each player based on their team's schedule.
+        
+        Args:
+            players: List of player dicts
+            games_per_team: Dict of {team_abbrev: num_games} from schedule
+        
+        Returns:
+            Same player list with 'games_remaining' added
+        """
+        if not games_per_team:
+            # No schedule data - set all to 0 (unknown)
+            for player in players:
+                player['games_remaining'] = 0
+            return players
+        
+        # Add games_remaining based on player's team
+        for player in players:
+            team = player.get('team', '')
+            player['games_remaining'] = games_per_team.get(team, 0)
+        
+        return players
+    
     def _filter_top_available_players(self, 
                                      available_players: List[Dict], 
                                      target_categories: Optional[List[str]] = None,
                                      limit: int = 25) -> List[Dict]:
-        """Intelligently filter to top available players."""
-        return available_players[:limit]
+        """
+        Intelligently filter to top available players.
+        
+        Scoring criteria:
+        - Games remaining (higher is better)
+        - Target category strength (if target_categories provided)
+        - Overall stat production
+        - Position value (Centers and PGs slightly preferred for scarcity)
+        
+        Args:
+            available_players: List of all available players
+            target_categories: Optional list of categories to prioritize
+            limit: Maximum number of players to return
+        
+        Returns:
+            Filtered and sorted list of top players
+        """
+        if not available_players:
+            return []
+        
+        # Score each player
+        scored_players = []
+        
+        for player in available_players:
+            score = 0
+            
+            # 1. Games remaining (0-10 points, scaled)
+            games = player.get('games_remaining', 0)
+            if games > 0:
+                # 4+ games = 10 points, 3 games = 7.5 points, 2 games = 5 points, 1 game = 2.5 points
+                score += min(10, games * 2.5)
+            
+            # 2. Target category strength (0-15 points if target_categories provided)
+            if target_categories:
+                stats = player.get('season_stats', {})
+                target_strength = 0
+                
+                for cat in target_categories:
+                    # Normalize category names
+                    cat_clean = cat.strip().upper()
+                    stat_value = 0
+                    
+                    # Get stat value with some basic thresholds for "good"
+                    if cat_clean == 'FG%':
+                        stat_value = stats.get('FG%', 0)
+                        if stat_value >= 0.50:  # 50%+ is excellent
+                            target_strength += 3
+                        elif stat_value >= 0.45:  # 45%+ is good
+                            target_strength += 2
+                    elif cat_clean == 'FT%':
+                        stat_value = stats.get('FT%', 0)
+                        if stat_value >= 0.85:  # 85%+ is excellent
+                            target_strength += 3
+                        elif stat_value >= 0.80:  # 80%+ is good
+                            target_strength += 2
+                    elif cat_clean == '3PTM':
+                        stat_value = stats.get('3PTM', 0)
+                        if stat_value >= 2.5:  # 2.5+ 3PM is excellent
+                            target_strength += 3
+                        elif stat_value >= 2.0:  # 2.0+ is good
+                            target_strength += 2
+                    elif cat_clean in ['PTS', 'POINTS']:
+                        stat_value = stats.get('PTS', 0)
+                        if stat_value >= 20:  # 20+ PPG is excellent
+                            target_strength += 3
+                        elif stat_value >= 15:  # 15+ is good
+                            target_strength += 2
+                    elif cat_clean in ['REB', 'REBOUNDS']:
+                        stat_value = stats.get('REB', 0)
+                        if stat_value >= 10:  # 10+ RPG is excellent
+                            target_strength += 3
+                        elif stat_value >= 7:  # 7+ is good
+                            target_strength += 2
+                    elif cat_clean in ['AST', 'ASSISTS']:
+                        stat_value = stats.get('AST', 0)
+                        if stat_value >= 7:  # 7+ APG is excellent
+                            target_strength += 3
+                        elif stat_value >= 5:  # 5+ is good
+                            target_strength += 2
+                    elif cat_clean in ['ST', 'STEALS']:
+                        stat_value = stats.get('ST', 0)
+                        if stat_value >= 1.5:  # 1.5+ SPG is excellent
+                            target_strength += 3
+                        elif stat_value >= 1.0:  # 1.0+ is good
+                            target_strength += 2
+                    elif cat_clean in ['BLK', 'BLOCKS']:
+                        stat_value = stats.get('BLK', 0)
+                        if stat_value >= 1.5:  # 1.5+ BPG is excellent
+                            target_strength += 3
+                        elif stat_value >= 1.0:  # 1.0+ is good
+                            target_strength += 2
+                    elif cat_clean == 'TO':
+                        stat_value = stats.get('TO', 99)
+                        if stat_value <= 1.5:  # Low TO is excellent
+                            target_strength += 3
+                        elif stat_value <= 2.0:  # 2.0 or less is good
+                            target_strength += 2
+                
+                score += min(15, target_strength)
+            
+            # 3. Overall production (0-10 points based on multi-category contribution)
+            stats = player.get('season_stats', {})
+            production_score = 0
+            
+            # Count categories where player is strong
+            if stats.get('PTS', 0) >= 12:
+                production_score += 1.5
+            if stats.get('REB', 0) >= 6:
+                production_score += 1.5
+            if stats.get('AST', 0) >= 4:
+                production_score += 1.5
+            if stats.get('3PTM', 0) >= 1.5:
+                production_score += 1.5
+            if stats.get('ST', 0) >= 0.8:
+                production_score += 1
+            if stats.get('BLK', 0) >= 0.8:
+                production_score += 1
+            if stats.get('FG%', 0) >= 0.45:
+                production_score += 1
+            if stats.get('FT%', 0) >= 0.75:
+                production_score += 0.5
+            
+            score += min(10, production_score)
+            
+            # 4. Position scarcity bonus (0-5 points)
+            position = player.get('primary_position', '')
+            if position in ['C', 'PG']:
+                # Centers and PGs are often more scarce in deep leagues
+                score += 3
+            elif position in ['PF', 'SG']:
+                score += 1
+            
+            scored_players.append({
+                'player': player,
+                'score': score
+            })
+        
+        # Sort by score (highest first)
+        scored_players.sort(key=lambda x: x['score'], reverse=True)
+        
+        # Return top N players
+        top_players = [item['player'] for item in scored_players[:limit]]
+        
+        if scored_players:
+            print(f"[DEBUG] Filtered {len(available_players)} → {len(top_players)} players")
+            print(f"[DEBUG] Top player score: {scored_players[0]['score']:.1f}, Bottom: {scored_players[min(limit-1, len(scored_players)-1)]['score']:.1f}")
+        
+        return top_players
     
     def _build_compact_roster_summary(self, my_roster: List[Dict]) -> str:
-        """Build compact roster summary (fewer tokens)."""
+        """Build compact roster summary with games remaining."""
         lines = []
         
         for player in my_roster:
@@ -599,8 +876,13 @@ class AIAnalyzer:
             pos = player.get('primary_position', 'N/A')
             slot = player.get('selected_position', 'N/A')
             injury = player.get('injury_status')
+            games = player.get('games_remaining', 0)
             
-            player_str = f"{name} ({team}-{pos})"
+            player_str = f"{name} ({team}-{pos}"
+            if games > 0:
+                player_str += f", {games}g"
+            player_str += ")"
+            
             if slot and slot != pos:
                 player_str += f" [{slot}]"
             if injury:
@@ -611,15 +893,21 @@ class AIAnalyzer:
         return '\n'.join(lines)
     
     def _build_compact_available_players(self, available_players: List[Dict]) -> str:
-        """Build compact available players list."""
+        """Build compact available players list with games remaining."""
         lines = []
         
         for player in available_players:
             name = player.get('name', 'Unknown')
             team = player.get('team', 'FA')
             pos = player.get('primary_position', 'N/A')
+            games = player.get('games_remaining', 0)
             
-            lines.append(f"{name} ({team}-{pos})")
+            player_str = f"{name} ({team}-{pos}"
+            if games > 0:
+                player_str += f", {games}g"
+            player_str += ")"
+            
+            lines.append(player_str)
         
         return '\n'.join(lines)
     
@@ -673,6 +961,13 @@ class AIAnalyzer:
         )
         
         print(f"[DEBUG] Filtered to top {len(filtered_players)} players")
+        
+        # ENHANCEMENT: Enrich players with games remaining from schedule
+        games_per_team = self._get_schedule_data(matchup_data)
+        if games_per_team:
+            print(f"[DEBUG] Enriching players with schedule data ({len(games_per_team)} teams)")
+            my_roster = self._enrich_players_with_schedule(my_roster, games_per_team)
+            filtered_players = self._enrich_players_with_schedule(filtered_players, games_per_team)
         
         roster_summary = self._build_compact_roster_summary(my_roster)
         available_summary = self._build_compact_available_players(filtered_players)

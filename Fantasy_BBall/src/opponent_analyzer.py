@@ -9,27 +9,7 @@ from typing import Dict, List, Optional
 from datetime import datetime
 
 # Import production utilities
-try:
-    from utils import cache, logger, retry_on_failure, safe_api_call, espn_rate_limiter
-    UTILS_AVAILABLE = True
-except ImportError:
-    UTILS_AVAILABLE = False
-    # Dummy implementations if utils not available
-    cache = None
-    class DummyLogger:
-        def info(self, msg): pass
-        def warning(self, msg): pass
-        def error(self, msg): pass
-    logger = DummyLogger()
-    def retry_on_failure(*args, **kwargs):
-        def decorator(func):
-            return func
-        return decorator
-    def safe_api_call(func):
-        return func
-    class DummyRateLimiter:
-        def wait_if_needed(self): pass
-    espn_rate_limiter = DummyRateLimiter()
+from util import cache, logger, retry_on_failure, safe_api_call, espn_rate_limiter
 
 
 class OpponentAnalyzer:
