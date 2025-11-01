@@ -53,9 +53,9 @@ class PlayerFetcher:
         if position:
             filters.append(f"position={position}")
         
-        # CRITICAL: Add ;out=stats to get player statistics
-        if include_stats:
-            filters.append("out=stats")
+        # NOTE: We do NOT request ;out=stats from Yahoo
+        # Yahoo stats are unreliable (league-specific, unclear format)
+        # We get all stats from NBA.com instead (more accurate)
         
         url += ";" + ";".join(filters) + "?format=json"
         
@@ -152,19 +152,23 @@ class PlayerFetcher:
     
     def _enrich_with_nba_stats(self, players: List[Dict]) -> List[Dict]:
         """
-        Add NBA.com stats (minutes, games played) to Yahoo players.
+        Add NBA.com stats to Yahoo players.
+        
+        NBA.com is the SINGLE SOURCE OF TRUTH for all player statistics.
+        Yahoo stats are unreliable (league-specific, unclear if totals or averages).
         
         Args:
-            players: List of Yahoo player dicts
+            players: List of Yahoo player dicts (names, teams, positions only)
         
         Returns:
-            Same list with NBA stats added
+            Same list with NBA.com stats added as 'season_stats'
         """
         if not self.nba_stats_fetcher:
             print("  ⚠️  NBA stats fetcher not available")
             return players
         
-        print(f"\n[NBA Stats] Enriching {len(players)} players with minutes/GP data...")
+        print(f"\n[NBA Stats] Enriching {len(players)} players with NBA.com stats...")
+        print(f"[NBA Stats] NBA.com is the SOURCE OF TRUTH for all player statistics")
         
         # Fetch NBA season leaders (single API call for 2025-26 season)
         nba_stats = self.nba_stats_fetcher.fetch_season_leaders(season="2025-26")
@@ -182,20 +186,25 @@ class PlayerFetcher:
             nba_match = self.nba_stats_fetcher.match_player(name, team, nba_stats)
             
             if nba_match:
+                # Use NBA.com as source of truth for ALL stats
+                # get_stats_dict() converts NBA field names to Yahoo format
+                player['season_stats'] = self.nba_stats_fetcher.get_stats_dict(nba_match)
                 player['minutes'] = nba_match['minutes']
                 player['games_played'] = nba_match['games_played']
                 player['nba_matched'] = True
                 matched += 1
             else:
-                # Calculate estimated quality from Yahoo stats as fallback
-                player['minutes'] = None
-                player['games_played'] = None
+                # No NBA match = no stats (will be filtered out by hard filters)
+                player['season_stats'] = {}
+                player['minutes'] = 0
+                player['games_played'] = 0
                 player['nba_matched'] = False
-                player['estimated_quality'] = self._calculate_quality_score(player)
         
-        print(f"  ✓ Matched {matched}/{len(players)} players with NBA Stats ({100*matched//len(players)}%)")
+        print(f"  ✓ Matched {matched}/{len(players)} players with NBA.com ({100*matched//len(players)}%)")
+        print(f"  ℹ️  Unmatched players have no stats (will be filtered: MIN < 20)")
         
         return players
+    
     
     def _calculate_quality_score(self, player: Dict) -> float:
         """
@@ -254,51 +263,9 @@ class PlayerFetcher:
         player_id = player_info.get('player_id')
         player_key = player_info.get('player_key')
         
-        # Extract stats (NEW!)
-        season_stats = {}
-        if 'player_stats' in player_info:
-            stats_data = player_info['player_stats']
-            if 'stats' in stats_data:
-                stats_list = stats_data['stats']
-                if isinstance(stats_list, list):
-                    for stat in stats_list:
-                        if 'stat' in stat:
-                            stat_data = stat['stat']
-                            if isinstance(stat_data, dict):
-                                stat_id = stat_data.get('stat_id')
-                                value = stat_data.get('value')
-                                
-                                if stat_id and value and value not in ['-', '-/-', None, '']:
-                                    # Map stat IDs to names
-                                    stat_mapping = {
-                                        '5': 'FG%',
-                                        '8': 'FT%',
-                                        '10': '3PTM',
-                                        '12': 'PTS',
-                                        '15': 'REB',
-                                        '16': 'AST',
-                                        '17': 'ST',
-                                        '18': 'BLK',
-                                        '19': 'TO',
-                                        '9004003': 'FGM/FGA',
-                                        '9007006': 'FTM/FTA'
-                                    }
-                                    
-                                    stat_name = stat_mapping.get(stat_id, f'stat_{stat_id}')
-                                    
-                                    # Convert to float for counting stats, keep as-is for percentages
-                                    if stat_name in ['FG%', 'FT%']:
-                                        try:
-                                            season_stats[stat_name] = float(value)
-                                        except ValueError:
-                                            season_stats[stat_name] = 0.0
-                                    elif stat_name in ['FGM/FGA', 'FTM/FTA']:
-                                        season_stats[stat_name] = value  # Keep as string "X/Y"
-                                    else:
-                                        try:
-                                            season_stats[stat_name] = float(value)
-                                        except ValueError:
-                                            season_stats[stat_name] = 0.0
+        # NOTE: We do NOT extract stats from Yahoo API here.
+        # Stats will come from NBA.com API during enrichment.
+        # This is more reliable - Yahoo returns league-specific stats that don't match reality.
         
         return {
             'player_id': player_id,
@@ -308,8 +275,8 @@ class PlayerFetcher:
             'primary_position': display_position,
             'eligible_positions': eligible_positions,
             'injury_status': injury_status,
-            'season_stats': season_stats,  # NEW: Yahoo stats
-            'raw_data': player_info  # Keep raw data for reference
+            'season_stats': {},  # Empty - will be filled from NBA.com
+            'raw_data': player_info
         }
     
     def filter_healthy_players(self, players):

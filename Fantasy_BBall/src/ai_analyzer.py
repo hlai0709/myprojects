@@ -51,6 +51,14 @@ except ImportError:
     STRATEGIC_ANALYZER_AVAILABLE = False
     print("⚠️  strategic_analyzer.py not found - Phase 4A features disabled")
 
+# Import PlayerEvaluator for advanced player evaluation
+try:
+    from player_evaluator import PlayerEvaluator
+    PLAYER_EVALUATOR_AVAILABLE = True
+except ImportError:
+    PLAYER_EVALUATOR_AVAILABLE = False
+    print("⚠️  player_evaluator.py not found - using basic filtering")
+
 # Import OpponentAnalyzer for schedule and category analysis
 try:
     from opponent_analyzer import OpponentAnalyzer
@@ -748,26 +756,26 @@ class AIAnalyzer:
                                      target_categories: Optional[List[str]] = None,
                                      limit: int = DEFAULT_PLAYER_LIMIT) -> List[Dict]:
         """
-        Intelligently filter to top available players.
-        
-        Scoring criteria:
-        - Games remaining (higher is better)
-        - Target category strength (if target_categories provided)
-        - Overall stat production
-        - Position value (Centers and PGs slightly preferred for scarcity)
-        
-        Args:
-            available_players: List of all available players
-            target_categories: Optional list of categories to prioritize
-            limit: Maximum number of players to return
-        
-        Returns:
-            Filtered and sorted list of top players
+        Uses PlayerEvaluator with quality-first scoring.
+        Falls back to basic filtering if PlayerEvaluator not available.
         """
         if not available_players:
             return []
         
-        # Score each player
+        # Use PlayerEvaluator if available
+        if PLAYER_EVALUATOR_AVAILABLE:
+            evaluator = PlayerEvaluator()
+            top_players = evaluator.filter_and_rank(available_players, limit=limit)
+            
+            if top_players:
+                print(f"[FILTER] {len(top_players)} players passed hard filters (MIN>=20, PTS>=8)")
+                print(f"[FILTER] Top player: {top_players[0].get('name')} (score: {top_players[0].get('final_score', 0):.1f})")
+            
+            return top_players
+        
+        # Fallback to basic filtering
+        print("[FILTER] Using fallback filtering (PlayerEvaluator not available)")
+        
         scored_players = []
         
         for player in available_players:
@@ -776,7 +784,6 @@ class AIAnalyzer:
             # 1. Games remaining (0-10 points, scaled)
             games = player.get('games_remaining', 0)
             if games > 0:
-                # 4+ games = 10 points, 3 games = 7.5 points, 2 games = 5 points, 1 game = 2.5 points
                 score += min(10, games * 2.5)
             
             # 2. Target category strength (0-15 points if target_categories provided)
@@ -785,73 +792,70 @@ class AIAnalyzer:
                 target_strength = 0
                 
                 for cat in target_categories:
-                    # Normalize category names
                     cat_clean = cat.strip().upper()
                     stat_value = 0
                     
-                    # Get stat value with some basic thresholds for "good"
                     if cat_clean == 'FG%':
                         stat_value = stats.get('FG%', 0)
-                        if stat_value >= 0.50:  # 50%+ is excellent
+                        if stat_value >= 0.50:
                             target_strength += 3
-                        elif stat_value >= 0.45:  # 45%+ is good
+                        elif stat_value >= 0.45:
                             target_strength += 2
                     elif cat_clean == 'FT%':
                         stat_value = stats.get('FT%', 0)
-                        if stat_value >= 0.85:  # 85%+ is excellent
+                        if stat_value >= 0.85:
                             target_strength += 3
-                        elif stat_value >= 0.80:  # 80%+ is good
+                        elif stat_value >= 0.80:
                             target_strength += 2
                     elif cat_clean == '3PTM':
                         stat_value = stats.get('3PTM', 0)
-                        if stat_value >= 2.5:  # 2.5+ 3PM is excellent
+                        if stat_value >= 2.5:
                             target_strength += 3
-                        elif stat_value >= 2.0:  # 2.0+ is good
+                        elif stat_value >= 2.0:
                             target_strength += 2
                     elif cat_clean in ['PTS', 'POINTS']:
                         stat_value = stats.get('PTS', 0)
-                        if stat_value >= 20:  # 20+ PPG is excellent
+                        if stat_value >= 20:
                             target_strength += 3
-                        elif stat_value >= 15:  # 15+ is good
+                        elif stat_value >= 15:
                             target_strength += 2
                     elif cat_clean in ['REB', 'REBOUNDS']:
                         stat_value = stats.get('REB', 0)
-                        if stat_value >= 10:  # 10+ RPG is excellent
+                        if stat_value >= 10:
                             target_strength += 3
-                        elif stat_value >= 7:  # 7+ is good
+                        elif stat_value >= 7:
                             target_strength += 2
                     elif cat_clean in ['AST', 'ASSISTS']:
                         stat_value = stats.get('AST', 0)
-                        if stat_value >= 7:  # 7+ APG is excellent
+                        if stat_value >= 7:
                             target_strength += 3
-                        elif stat_value >= 5:  # 5+ is good
+                        elif stat_value >= 5:
                             target_strength += 2
                     elif cat_clean in ['ST', 'STEALS']:
                         stat_value = stats.get('ST', 0)
-                        if stat_value >= 1.5:  # 1.5+ SPG is excellent
+                        if stat_value >= 1.5:
                             target_strength += 3
-                        elif stat_value >= 1.0:  # 1.0+ is good
+                        elif stat_value >= 1.0:
                             target_strength += 2
                     elif cat_clean in ['BLK', 'BLOCKS']:
                         stat_value = stats.get('BLK', 0)
-                        if stat_value >= 1.5:  # 1.5+ BPG is excellent
+                        if stat_value >= 1.5:
                             target_strength += 3
-                        elif stat_value >= 1.0:  # 1.0+ is good
+                        elif stat_value >= 1.0:
                             target_strength += 2
                     elif cat_clean == 'TO':
                         stat_value = stats.get('TO', 99)
-                        if stat_value <= 1.5:  # Low TO is excellent
+                        if stat_value <= 1.5:
                             target_strength += 3
-                        elif stat_value <= 2.0:  # 2.0 or less is good
+                        elif stat_value <= 2.0:
                             target_strength += 2
                 
                 score += min(15, target_strength)
             
-            # 3. Overall production (0-10 points based on multi-category contribution)
+            # 3. Overall production (0-10 points)
             stats = player.get('season_stats', {})
             production_score = 0
             
-            # Count categories where player is strong
             if stats.get('PTS', 0) >= 12:
                 production_score += 1.5
             if stats.get('REB', 0) >= 6:
@@ -874,7 +878,6 @@ class AIAnalyzer:
             # 4. Position scarcity bonus (0-5 points)
             position = player.get('primary_position', '')
             if position in ['C', 'PG']:
-                # Centers and PGs are often more scarce in deep leagues
                 score += 3
             elif position in ['PF', 'SG']:
                 score += 1
@@ -895,9 +898,10 @@ class AIAnalyzer:
             print(f"[DEBUG] Top player score: {scored_players[0]['score']:.1f}, Bottom: {scored_players[min(limit-1, len(scored_players)-1)]['score']:.1f}")
         
         return top_players
+
     
     def _build_compact_roster_summary(self, my_roster: List[Dict]) -> str:
-        """Build compact roster summary with games remaining."""
+        """Build compact roster summary with ALL stats displayed."""
         lines = []
         
         for player in my_roster:
@@ -907,11 +911,25 @@ class AIAnalyzer:
             slot = player.get('selected_position', 'N/A')
             injury = player.get('injury_status')
             games = player.get('games_remaining', 0)
+            stats = player.get('season_stats', {})
             
+            # Format: Name (TEAM-POS, Xg) - PPG/RPG/AST/ST/BLK/3PM/TO/FG%/FT%/MIN
             player_str = f"{name} ({team}-{pos}"
             if games > 0:
                 player_str += f", {games}g"
-            player_str += ")"
+            player_str += ") - "
+            
+            # Add all stats
+            player_str += f"{stats.get('PTS', 0):.1f}/"
+            player_str += f"{stats.get('REB', 0):.1f}/"
+            player_str += f"{stats.get('AST', 0):.1f}/"
+            player_str += f"{stats.get('ST', 0):.1f}/"
+            player_str += f"{stats.get('BLK', 0):.1f}/"
+            player_str += f"{stats.get('3PTM', 0):.1f}/"
+            player_str += f"{stats.get('TO', 0):.1f}/"
+            player_str += f"{stats.get('FG%', 0):.3f}/"
+            player_str += f"{stats.get('FT%', 0):.3f}/"
+            player_str += f"{stats.get('MIN', 0):.1f}"
             
             if slot and slot != pos:
                 player_str += f" [{slot}]"
@@ -919,11 +937,12 @@ class AIAnalyzer:
                 player_str += f" ⚠️{injury}"
             
             lines.append(player_str)
+
         
         return '\n'.join(lines)
     
     def _build_compact_available_players(self, available_players: List[Dict]) -> str:
-        """Build compact available players list with games remaining."""
+        """Build compact available players list with ALL stats and quality scores."""
         lines = []
         
         for player in available_players:
@@ -931,11 +950,30 @@ class AIAnalyzer:
             team = player.get('team', 'FA')
             pos = player.get('primary_position', 'N/A')
             games = player.get('games_remaining', 0)
+            stats = player.get('season_stats', {})
+            final_score = player.get('final_score', 0)
             
+            # Format: Name (TEAM-POS, Xg) - PPG/RPG/AST/ST/BLK/3PM/TO/FG%/FT%/MIN [Score: XX.X]
             player_str = f"{name} ({team}-{pos}"
             if games > 0:
                 player_str += f", {games}g"
-            player_str += ")"
+            player_str += ") - "
+            
+            # Add all stats
+            player_str += f"{stats.get('PTS', 0):.1f}/"
+            player_str += f"{stats.get('REB', 0):.1f}/"
+            player_str += f"{stats.get('AST', 0):.1f}/"
+            player_str += f"{stats.get('ST', 0):.1f}/"
+            player_str += f"{stats.get('BLK', 0):.1f}/"
+            player_str += f"{stats.get('3PTM', 0):.1f}/"
+            player_str += f"{stats.get('TO', 0):.1f}/"
+            player_str += f"{stats.get('FG%', 0):.3f}/"
+            player_str += f"{stats.get('FT%', 0):.3f}/"
+            player_str += f"{stats.get('MIN', 0):.1f}"
+            
+            # Add quality score if available
+            if final_score > 0:
+                player_str += f" [Score: {final_score:.1f}]"
             
             lines.append(player_str)
         

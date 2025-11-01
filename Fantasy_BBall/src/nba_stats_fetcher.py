@@ -186,6 +186,39 @@ class NBAStatsFetcher:
             print(f"[NBA Stats] Error parsing response: {e}")
             return {}
     
+    def get_stats_dict(self, nba_match: Dict) -> Dict:
+        """
+        Convert NBA.com stats to season_stats dict compatible with Yahoo format.
+        
+        NBA.com API returns per-game averages (PerGame mode), so no conversion needed.
+        This method just maps NBA field names to Yahoo field names.
+        
+        Args:
+            nba_match: Dict from match_player() containing NBA.com stats
+        
+        Returns:
+            Dict with keys matching Yahoo format: PTS, REB, AST, ST, BLK, TO, 3PTM, FG%, FT%, MIN
+            All values are per-game averages (already from API).
+        
+        Example:
+            >>> nba_match = {'points': 24.5, 'rebounds': 8.2, 'blocks': 0.6, ...}
+            >>> stats = fetcher.get_stats_dict(nba_match)
+            >>> stats
+            {'PTS': 24.5, 'REB': 8.2, 'BLK': 0.6, ...}
+        """
+        return {
+            'PTS': round(nba_match.get('points', 0), 1),
+            'REB': round(nba_match.get('rebounds', 0), 1),
+            'AST': round(nba_match.get('assists', 0), 1),
+            'ST': round(nba_match.get('steals', 0), 1),
+            'BLK': round(nba_match.get('blocks', 0), 1),
+            'TO': round(nba_match.get('turnovers', 0), 1),
+            '3PTM': round(nba_match.get('three_pm', 0), 1),
+            'FG%': round(nba_match.get('fg_pct', 0), 3),
+            'FT%': round(nba_match.get('ft_pct', 0), 3),
+            'MIN': round(nba_match.get('minutes', 0), 1)
+        }
+    
     def match_player(self, yahoo_name: str, yahoo_team: str, 
                      nba_stats: Optional[Dict] = None) -> Optional[Dict]:
         """
