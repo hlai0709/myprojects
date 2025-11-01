@@ -69,6 +69,36 @@ except ImportError:
     logger = None
     print("⚠️  util.py caching not available")
 
+# Import constants
+try:
+    from constants import (
+        CACHE_TTL_AVAILABLE_PLAYERS,
+        DEFAULT_PLAYER_LIMIT,
+        MAX_AVAILABLE_PLAYERS,
+        SUNDAY_CUTOFF_HOUR,
+        DEFAULT_MAX_MOVES_PER_WEEK,
+        SEASON_START_DATE,
+        DAYS_PER_WEEK,
+        THRESHOLDS,
+        PRODUCTION_THRESHOLDS,
+        POSITION_SCARCITY,
+        SCORING_GAMES_REMAINING_MAX,
+        SCORING_TARGET_CATS_MAX,
+        SCORING_PRODUCTION_MAX,
+    )
+    CONSTANTS_AVAILABLE = True
+except ImportError:
+    # Fallback to hardcoded values if constants.py not available
+    CONSTANTS_AVAILABLE = False
+    CACHE_TTL_AVAILABLE_PLAYERS = 1800
+    DEFAULT_PLAYER_LIMIT = 25
+    MAX_AVAILABLE_PLAYERS = 500
+    SUNDAY_CUTOFF_HOUR = 22
+    DEFAULT_MAX_MOVES_PER_WEEK = 4
+    SEASON_START_DATE = (2024, 10, 21)
+    DAYS_PER_WEEK = 7
+    print("⚠️  constants.py not found - using fallback values")
+
 
 class AIAnalyzer:
     """
@@ -215,13 +245,13 @@ class AIAnalyzer:
         """Check if API is ready to use."""
         return self.client is not None
     
-    def _get_target_week(self, sunday_cutoff_hour: int = 22) -> int:
+    def _get_target_week(self, sunday_cutoff_hour: int = SUNDAY_CUTOFF_HOUR) -> int:
         """
         Get the correct week to analyze (handles Sunday look-ahead).
         
         CRITICAL FIX: Uses matchup_scheduler.get_target_week() which:
         - Returns current week normally
-        - Returns NEXT week on Sundays after cutoff_hour (default 10pm)
+        - Returns NEXT week on Sundays after cutoff_hour (uses SUNDAY_CUTOFF_HOUR from constants)
         
         Args:
             sunday_cutoff_hour: Hour (0-23) to switch to next week on Sundays
@@ -370,7 +400,7 @@ class AIAnalyzer:
             
             if roster_adds:
                 moves_made = int(roster_adds.get('value', 0))
-                max_moves = 4  # Common setting
+                max_moves = DEFAULT_MAX_MOVES_PER_WEEK  # From constants
                 moves_remaining = max(0, max_moves - moves_made)
                 
                 print(f"[DEBUG] Roster moves: {moves_made}/{max_moves} used, {moves_remaining} remaining")
@@ -469,10 +499,10 @@ class AIAnalyzer:
             print("[DEBUG] Falling back to JSON file")
             return self._load_players_from_file()
         
-        # Check cache first (30 minute TTL - players don't change that frequently)
+        # Check cache first (uses CACHE_TTL_AVAILABLE_PLAYERS from constants)
         cache_key = f"available_players_{self.config.settings.league_id}"
         if use_cache and CACHE_AVAILABLE and cache:
-            cached_data = cache.get(cache_key, max_age_seconds=1800)  # 30 minutes
+            cached_data = cache.get(cache_key, max_age_seconds=CACHE_TTL_AVAILABLE_PLAYERS)
             if cached_data:
                 print(f"[DEBUG] ✓ Using cached available players ({len(cached_data)} players)")
                 return cached_data
@@ -481,7 +511,7 @@ class AIAnalyzer:
             print(f"[DEBUG] Fetching all available players...")
             all_players = self.player_fetcher.get_all_available_players(
                 self.config.settings.league_id,
-                max_players=500
+                max_players=MAX_AVAILABLE_PLAYERS
             )
             
             print(f"[DEBUG] Filtering for healthy players...")
@@ -716,7 +746,7 @@ class AIAnalyzer:
     def _filter_top_available_players(self, 
                                      available_players: List[Dict], 
                                      target_categories: Optional[List[str]] = None,
-                                     limit: int = 25) -> List[Dict]:
+                                     limit: int = DEFAULT_PLAYER_LIMIT) -> List[Dict]:
         """
         Intelligently filter to top available players.
         
@@ -1172,7 +1202,7 @@ You are an expert fantasy basketball analyst. Provide strategic recommendations 
         print(f"✓ Loaded {len(available_players)} available players")
         
         # CRITICAL FIX: Use correct target week (handles Sunday look-ahead)
-        target_week = self._get_target_week(sunday_cutoff_hour=22)
+        target_week = self._get_target_week(sunday_cutoff_hour=SUNDAY_CUTOFF_HOUR)
         matchup_data = self.fetch_live_matchup(target_week=target_week)
         if matchup_data:
             print(f"✓ Loaded Week {matchup_data.get('week')} matchup data")
@@ -1256,7 +1286,7 @@ if __name__ == "__main__":
     if choice == "1":
         try:
             # This will use the correct target week
-            target_week = analyzer._get_target_week(sunday_cutoff_hour=22)
+            target_week = analyzer._get_target_week(sunday_cutoff_hour=SUNDAY_CUTOFF_HOUR)
             matchup_data = analyzer.fetch_live_matchup(target_week=target_week)
             if matchup_data and 'strategic_targets' in matchup_data:
                 winnable = matchup_data['strategic_targets'].get('winnable', [])
