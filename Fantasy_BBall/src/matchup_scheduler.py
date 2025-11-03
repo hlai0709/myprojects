@@ -7,10 +7,12 @@ Key Features:
 - Determines which week's matchup to fetch
 - Handles week transitions intelligently
 - Parses opponent information from matchup data
+- TIMEZONE AWARE: Uses configured timezone for accurate week detection
 """
 
 from datetime import datetime, timedelta
 from typing import Dict, Optional
+from zoneinfo import ZoneInfo
 import json
 import os
 
@@ -18,16 +20,28 @@ import os
 class MatchupScheduler:
     """
     Manages matchup scheduling and Sunday look-ahead logic.
+    TIMEZONE AWARE: Properly handles week transitions in user's timezone.
     """
     
-    def __init__(self, auth_client):
+    def __init__(self, auth_client, config=None):
         """
-        Initialize scheduler with Yahoo auth client.
+        Initialize scheduler with Yahoo auth client and optional config.
         
         Args:
             auth_client: YahooAuth instance for API calls
+            config: LeagueConfig instance (optional, for timezone)
         """
         self.auth = auth_client
+        self.config = config
+        
+        # Get timezone from config (defaults to US/Pacific if not provided)
+        if config and hasattr(config, 'settings') and hasattr(config.settings, 'timezone'):
+            self.timezone = ZoneInfo(config.settings.timezone)
+        else:
+            # Default to Pacific time if no config provided
+            self.timezone = ZoneInfo("US/Pacific")
+            print("[WARNING] No timezone in config, defaulting to US/Pacific")
+        
         self.cache_file = 'data/matchup_schedule_cache.json'
         self._cache = self._load_cache()
     
@@ -55,16 +69,16 @@ class MatchupScheduler:
     
     def is_sunday(self, date: Optional[datetime] = None) -> bool:
         """
-        Check if given date (or today) is Sunday.
+        Check if given date (or today in configured timezone) is Sunday.
         
         Args:
-            date: Date to check (defaults to today)
+            date: Date to check (defaults to now in configured timezone)
         
         Returns:
             True if Sunday, False otherwise
         """
         if date is None:
-            date = datetime.now()
+            date = datetime.now(self.timezone)
         return date.weekday() == 6  # Sunday = 6
     
     def get_current_week(self, team_key: str) -> int:
@@ -175,17 +189,21 @@ class MatchupScheduler:
         """
         Determine if we should look ahead to next week.
         
-        On Sundays (after cutoff_hour), we look ahead to next week's matchup.
+        On Sundays (after cutoff_hour in configured timezone), we look ahead to next week's matchup.
         
         Args:
-            date: Date to check (defaults to now)
+            date: Date to check (defaults to now in configured timezone)
             cutoff_hour: Hour of day to switch (0 = midnight, 22 = 10pm)
         
         Returns:
             True if should analyze next week, False for current week
         """
         if date is None:
-            date = datetime.now()
+            date = datetime.now(self.timezone)
+        
+        # Ensure date is timezone-aware (use configured timezone if naive)
+        if date.tzinfo is None:
+            date = date.replace(tzinfo=self.timezone)
         
         # Check if it's Sunday
         if not self.is_sunday(date):

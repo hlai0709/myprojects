@@ -21,6 +21,11 @@ class LeagueSettings:
     season: str = "2025-26"
     game_key: str = "466"
     
+    # Timezone for week calculations (CRITICAL for Sunday night analysis)
+    # Use IANA timezone names: "US/Pacific", "US/Eastern", "US/Central", "US/Mountain"
+    # Or: "America/Los_Angeles", "America/New_York", "America/Chicago", "America/Denver"
+    timezone: str = "US/Pacific"
+    
     # League structure
     max_teams: int = 12
     scoring_type: str = "Head-to-Head - Categories"

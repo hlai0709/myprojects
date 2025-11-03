@@ -6,6 +6,8 @@ ai_analyzer.py - PHASE 4A COMPLETE + CRITICAL FIXES
 - FIXED: Correct week detection using matchup_scheduler
 - FIXED: Sunday look-ahead for next week's opponent
 - FIXED: Filter out already-dropped players
+- FIXED: Timezone-aware week detection (uses configured timezone)
+- FIXED: Injury hallucination prevention
 - Enhanced logging
 """
 
@@ -13,6 +15,7 @@ import json
 import os
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 # Try to import Anthropic SDK
@@ -154,7 +157,7 @@ class AIAnalyzer:
                 self.roster_analyzer = RosterAnalyzer(self.auth, self.config)
                 self.player_fetcher = PlayerFetcher(self.auth)
                 self.matchup_analyzer = MatchupAnalyzer(self.auth, self.config)
-                self.matchup_scheduler = MatchupScheduler(self.auth)
+                self.matchup_scheduler = MatchupScheduler(self.auth, self.config)
                 
                 # Initialize OpponentAnalyzer for schedule data
                 if OPPONENT_ANALYZER_AVAILABLE:
@@ -255,11 +258,12 @@ class AIAnalyzer:
     
     def _get_target_week(self, sunday_cutoff_hour: int = SUNDAY_CUTOFF_HOUR) -> int:
         """
-        Get the correct week to analyze (handles Sunday look-ahead).
+        Get the correct week to analyze (handles Sunday look-ahead with TIMEZONE AWARENESS).
         
         CRITICAL FIX: Uses matchup_scheduler.get_target_week() which:
         - Returns current week normally
-        - Returns NEXT week on Sundays after cutoff_hour (uses SUNDAY_CUTOFF_HOUR from constants)
+        - Returns NEXT week on Sundays after cutoff_hour (in configured timezone!)
+        - Now properly handles PST vs UTC timezone differences
         
         Args:
             sunday_cutoff_hour: Hour (0-23) to switch to next week on Sundays
@@ -277,13 +281,18 @@ class AIAnalyzer:
             cutoff_hour=sunday_cutoff_hour
         )
         
-        # Log what we're doing
-        now = datetime.now()
+        # Log what we're doing (use configured timezone!)
+        tz = ZoneInfo(self.config.settings.timezone) if self.config else ZoneInfo("US/Pacific")
+        now = datetime.now(tz)
+        
         is_sunday = now.weekday() == 6
+        timezone_name = self.config.settings.timezone if self.config else "PST"
+        current_time_str = now.strftime('%a %I:%M %p')
+        
         if is_sunday and now.hour >= sunday_cutoff_hour:
-            print(f"[DEBUG] Sunday after {sunday_cutoff_hour}:00 - Looking ahead to Week {target_week}")
+            print(f"[DEBUG] Sunday after {sunday_cutoff_hour}:00 {timezone_name} ({current_time_str}) - Looking ahead to Week {target_week}")
         else:
-            print(f"[DEBUG] Analyzing Week {target_week}")
+            print(f"[DEBUG] Analyzing Week {target_week} (current time: {current_time_str} {timezone_name})")
         
         return target_week
     
@@ -901,7 +910,20 @@ class AIAnalyzer:
 
     
     def _build_compact_roster_summary(self, my_roster: List[Dict]) -> str:
-        """Build compact roster summary with ALL stats displayed."""
+        """Build compact roster summary with ALL stats and CLEAR injury status."""
+        
+        # Injury code mapping to prevent AI hallucinations
+        INJURY_CODES = {
+            'O': 'OUT',
+            'GTD': 'QUESTIONABLE',
+            'DTD': 'DAY-TO-DAY',
+            'IR': 'INJ-RESERVE',
+            'INJ': 'INJURED',
+            'SUSP': 'SUSPENDED',
+            'NA': 'NOT-ACTIVE',
+            'PUP': 'UNABLE-TO-PLAY'
+        }
+        
         lines = []
         
         for player in my_roster:
@@ -934,7 +956,9 @@ class AIAnalyzer:
             if slot and slot != pos:
                 player_str += f" [{slot}]"
             if injury:
-                player_str += f" ⚠️{injury}"
+                # Expand cryptic injury codes for clarity
+                clear_status = INJURY_CODES.get(injury, injury)
+                player_str += f" ⚠️{clear_status}"
             
             lines.append(player_str)
 
