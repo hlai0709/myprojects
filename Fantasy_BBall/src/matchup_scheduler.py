@@ -81,12 +81,16 @@ class MatchupScheduler:
             date = datetime.now(self.timezone)
         return date.weekday() == 6  # Sunday = 6
     
-    def get_current_week(self, team_key: str) -> int:
+    def get_current_week(self, team_key: str, use_roster_api: bool = True) -> int:
         """
         Get the current fantasy week number.
         
+        UPDATED: Now uses roster_adds API as primary source (more reliable during transitions).
+        Falls back to matchup API if roster_adds unavailable.
+        
         Args:
             team_key: Your team key (e.g., "466.l.39285.t.2")
+            use_roster_api: If True, try roster API first (recommended)
         
         Returns:
             Current week number (e.g., 1, 2, 3...)
@@ -96,6 +100,44 @@ class MatchupScheduler:
         if cache_key in self._cache:
             return self._cache[cache_key]
         
+        week = None
+        
+        # Method 1: Try roster_adds API first (most reliable during week transitions)
+        if use_roster_api:
+            try:
+                url = f"{self.auth.fantasy_base_url}team/{team_key}?format=json"
+                response = self.auth.session.get(url, timeout=10)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    team_data = data['fantasy_content']['team']
+                    
+                    # Find roster_adds (can be in dict or nested list)
+                    for item in team_data:
+                        if isinstance(item, dict) and 'roster_adds' in item:
+                            roster_adds = item['roster_adds']
+                            if 'coverage_value' in roster_adds:
+                                week = int(roster_adds['coverage_value'])
+                                break
+                        elif isinstance(item, list):
+                            for sub in item:
+                                if isinstance(sub, dict) and 'roster_adds' in sub:
+                                    roster_adds = sub['roster_adds']
+                                    if 'coverage_value' in roster_adds:
+                                        week = int(roster_adds['coverage_value'])
+                                        break
+                            if week:
+                                break
+                    
+                    if week:
+                        # Cache and return
+                        self._cache[cache_key] = week
+                        self._save_cache(self._cache)
+                        return week
+            except Exception:
+                pass  # Fall through to matchup API
+        
+        # Method 2: Fallback to matchup API
         try:
             # Fetch current matchup
             url = f"{self.auth.fantasy_base_url}team/{team_key}/matchups?format=json"
@@ -132,6 +174,7 @@ class MatchupScheduler:
                                     
                                     return week
         except Exception:
+            pass  # Fall through to fallback methods
             pass  # Fall through to fallback methods
         
         # Fallback: Try to get scoreboard to determine current week
@@ -217,21 +260,36 @@ class MatchupScheduler:
     
     def get_target_week(self, team_key: str, 
                        date: Optional[datetime] = None,
-                       cutoff_hour: int = 0) -> int:
+                       cutoff_hour: int = 0,
+                       debug: bool = False) -> int:
         """
-        Get the week number to analyze.
+        Get the week number to analyze (with optional verification logging).
         
         Args:
             team_key: Your team key
-            date: Date to check (defaults to now)
+            date: Date to check (defaults to now in configured timezone)
             cutoff_hour: Sunday cutoff hour (0-23)
+            debug: If True, print week detection details
         
         Returns:
             Week number to analyze
         """
-        current_week = self.get_current_week(team_key)
+        # Get current week (roster API primary, matchup API fallback)
+        current_week = self.get_current_week(team_key, use_roster_api=True)
         
+        if debug:
+            # Also get matchup API version for comparison
+            matchup_week = self.get_current_week(team_key, use_roster_api=False)
+            if matchup_week != current_week:
+                print(f"[DEBUG] ⚠️ Week API mismatch detected:")
+                print(f"[DEBUG]   Roster API (primary): Week {current_week}")
+                print(f"[DEBUG]   Matchup API (fallback): Week {matchup_week}")
+                print(f"[DEBUG]   Using Roster API week ({current_week}) - more reliable during transitions")
+        
+        # Check if we should look ahead (only on Sunday nights)
         if self.should_look_ahead(date, cutoff_hour):
+            if debug:
+                print(f"[DEBUG] Sunday night look-ahead: Week {current_week} → Week {current_week + 1}")
             return current_week + 1
         
         return current_week

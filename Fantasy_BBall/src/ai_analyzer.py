@@ -278,7 +278,8 @@ class AIAnalyzer:
         team_key = self._get_team_key()
         target_week = self.matchup_scheduler.get_target_week(
             team_key,
-            cutoff_hour=sunday_cutoff_hour
+            cutoff_hour=sunday_cutoff_hour,
+            debug=True  # Enable detailed logging
         )
         
         # Log what we're doing (use configured timezone!)
